@@ -1,0 +1,9 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'services/*'
+allowBuilds:
+  es5-ext: false
+  esbuild: false
+  sharp: false
+  unrs-resolver: false

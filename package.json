@@ -21,11 +21,6 @@
     "apps/*",
     "packages/*",
     "services/*"
-  ],
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "sharp",
-      "unrs-resolver"
-    ]
-  }
+  ]
+  
 }
