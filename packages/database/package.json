@@ -1,0 +1,22 @@
+{
+  "name": "@codeBeacon/database",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "db:generate": "drizzle-kit generate:pg",
+    "db:push": "drizzle-kit push:pg",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.30.0",
+    "postgres": "^3.4.4"
+  },
+
+  "devDependencies": {
+    "@codeBeacon/tsconfig": "workspace:*",
+    "drizzle-kit": "^0.20.14",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
