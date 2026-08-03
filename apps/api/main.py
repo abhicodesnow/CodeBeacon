@@ -57,6 +57,9 @@ async def queue_analysis(request: AnalyzeRequest):
     
     # Send the job to Redis using the exact function name from worker.py
     job = await redis.enqueue_job("analyze_code_task", request.repository_url)
+
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to queue the analysis job.")
     
     return {
         "message": "Analysis queued successfully",
