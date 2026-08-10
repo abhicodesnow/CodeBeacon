@@ -39,26 +39,15 @@ def main():
     print("--> [ML Pipeline] Initializing training sequence...")
 
     # 1. LOAD THE DATASET
-    # (We will replace this with a real dataset of open-source C++ and Python repos)
     print("--> [ML Pipeline] Loading dataset...")
-    
-    # MOCK DATASET (Until we download the real one)
-    # y = target variable (bug probability 0-100)
-    raw_data = {
-        "language": ["py", "cpp", "py", "cpp"],
-        "code": [
-            "def add(a, b): return a + b", 
-            "int main() { for(int i=0; i<10; i++) { if(i%2==0) { cout << i; } } return 0; }",
-            "def complex_logic(x): \n for i in range(100): \n  if i == x: \n   for j in range(x): \n    print(j)",
-            "void doNothing() { int x = 0; }"
-        ],
-        "historical_bug_probability": [2.5, 45.0, 85.0, 1.0]
-    }
-    
-    df = pd.DataFrame(raw_data)
+    try:
+        df = pd.read_csv("synthetic_code_data.csv")
+    except FileNotFoundError:
+        print("Error: synthetic_code_data.csv not found. Run generate_dataset.py first.")
+        return
 
     # 2. FEATURE EXTRACTION
-    print("--> [ML Pipeline] Extracting AST features from source code...")
+    print("--> [ML Pipeline] Extracting AST features using Lizard...")
     features_list = []
     
     for index, row in df.iterrows():
@@ -67,14 +56,13 @@ def main():
             features["bug_probability"] = row["historical_bug_probability"]
             features_list.append(features)
 
-    # Convert the extracted features back into a structured DataFrame
     ml_df = pd.DataFrame(features_list)
 
     # 3. PREPARE FOR TRAINING
-    # Separate the features (X) from the answers (y)
     X = ml_df.drop(columns=["bug_probability"])
     y = ml_df["bug_probability"]
 
+    # Split into 80% training data, 20% testing data
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # 4. TRAIN THE MODEL
@@ -85,7 +73,11 @@ def main():
     # 5. EVALUATE THE MODEL
     predictions = model.predict(X_test)
     mse = mean_squared_error(y_test, predictions)
-    print(f"--> [ML Pipeline] Model Evaluation - Mean Squared Error: {mse:.2f}")
+    r2 = r2_score(y_test, predictions)
+    
+    print(f"--> [ML Pipeline] Model Evaluation:")
+    print(f"    - Mean Squared Error: {mse:.2f}")
+    print(f"    - R-squared Score: {r2:.2f} (Closer to 1.0 is better)")
 
     # 6. EXPORT
     joblib.dump(model, "bug_probability_rf.joblib")

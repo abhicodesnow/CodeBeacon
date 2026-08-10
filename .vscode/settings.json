@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "/home/abhiii/Documents/CodeBeacon/apps/api/venv/bin/python3",
+    "python.analysis.extraPaths": [
+        "/home/abhiii/Documents/CodeBeacon/apps/api/venv/lib/python3.14/site-packages"
+    ]
+}
