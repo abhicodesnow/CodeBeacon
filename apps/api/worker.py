@@ -1,57 +1,47 @@
-import asyncio
-import random
+import joblib
+import lizard
+import pandas as pd
 from arq.connections import RedisSettings
 
-# Note: In Phase 4, you will load your actual trained models here at startup
-# e.g., bug_model = joblib.load("models/bug_probability_rf.pkl")
+# 1. Load the model into memory when the worker starts
+MODEL_PATH = "models/bug_probability_rf.joblib"
+bug_model = joblib.load(MODEL_PATH)
 
-async def extract_features(repository_url: str):
-    """
-    Simulates the Static Analysis and Feature Extraction steps of the pipeline.
-    """
-    print(f"--> [WORKER] Extracting static features for {repository_url}...")
-    await asyncio.sleep(2) # Simulating processing time
+def extract_features(code_string, language):
+    """Parses incoming code from the API request."""
+    analysis = lizard.analyze_file.analyze_source_code("temp." + language, code_string)
     
-    # Returning mock metrics based on SRS requirements like Cyclomatic Complexity and Lines of Code
-    return {
-        "lines_of_code": random.randint(500, 5000),
-        "cyclomatic_complexity": random.randint(10, 100),
-        "comment_density": round(random.uniform(0.05, 0.30), 2)
-    }
+    if analysis.function_list:
+        avg_cyc = sum(f.cyclomatic_complexity for f in analysis.function_list) / len(analysis.function_list)
+        avg_nloc = sum(f.nloc for f in analysis.function_list) / len(analysis.function_list)
+        avg_params = sum(f.parameter_count for f in analysis.function_list) / len(analysis.function_list)
+    else:
+        avg_cyc, avg_nloc, avg_params = 1.0, analysis.nloc, 0.0
 
-async def analyze_code_task(ctx, repository_url: str):
-    print(f"--> [WORKER] Initiating ML pipeline for {repository_url}...")
+    return pd.DataFrame([{
+        "lines_of_code": analysis.nloc,
+        "avg_cyclomatic_complexity": avg_cyc,
+        "avg_function_lines": avg_nloc,
+        "avg_parameters": avg_params,
+        "token_count": analysis.token_count
+    }])
+
+async def analyze_code_task(ctx, code: str, language: str):
+    """The background task triggered by FastAPI."""
+    print(f"--> [Worker] Analyzing {language} code...")
     
-    try:
-        # Step 1: Feature Extraction
-        features = await extract_features(repository_url)
-        
-        # Step 2: ML Prediction (Simulating Random Forest / XGBoost execution)
-        print("--> [WORKER] Feeding features into local ML models...")
-        await asyncio.sleep(1) 
-        
-        # Generating output strictly matching the Machine Learning Module specifications
-        predictions = {
-            "bug_probability": round(random.uniform(0.0, 100.0), 2),  # 0-100%
-            "maintainability": round(random.uniform(0.0, 100.0), 2),  # 0-100
-            "complexity": random.choice(["Low", "Medium", "High"]),   # Low/Medium/High
-            "security_risk": random.choice(["Low", "Medium", "High"]) # Low/Medium/High
-        }
-        
-        print(f"--> [WORKER] Analysis complete! Predictions: {predictions}")
-        
-        # Step 3: Return payload ready for Database Storage
-        return {
-            "status": "success", 
-            "repo": repository_url, 
-            "extracted_features": features,
-            "ml_predictions": predictions
-        }
-        
-    except Exception as e:
-        print(f"--> [WORKER] ML Pipeline Error: {str(e)}")
-        return {"status": "failed", "error": str(e)}
+    # 2. Extract features using Lizard
+    features_df = extract_features(code, language)
+    
+    # 3. Run the prediction
+    prediction = bug_model.predict(features_df)[0]
+    
+    print(f"--> [Worker] Prediction complete: {prediction:.2f}% bug probability")
+    return {"bug_probability": round(prediction, 2)}
 
+# 4. Worker Configuration
+# This tells Arq which functions to expose and how to connect to Redis
 class WorkerSettings:
     functions = [analyze_code_task]
-    redis_settings = RedisSettings(host="localhost", port=6379)
+    # Connects to localhost:6379 by default
+    redis_settings = RedisSettings()
