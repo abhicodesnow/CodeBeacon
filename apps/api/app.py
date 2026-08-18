@@ -3,8 +3,17 @@ from pydantic import BaseModel
 from arq import create_pool
 from arq.connections import RedisSettings
 import asyncio
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="CodeBeacon AI API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"], # Allow your Next.js frontend
+    allow_credentials=True,
+    allow_methods=["*"], # Allow POST, GET, OPTIONS, etc.
+    allow_headers=["*"],
+)
 
 # Define what the API expects to receive
 class CodePayload(BaseModel):
