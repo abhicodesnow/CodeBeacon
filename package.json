@@ -21,6 +21,10 @@
     "apps/*",
     "packages/*",
     "services/*"
-  ]
-  
+  ],
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@supabase/ssr": "^0.12.4",
+    "@supabase/supabase-js": "^2.112.3"
+  }
 }
