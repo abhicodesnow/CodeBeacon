@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Editor from '@monaco-editor/react';
-import AuthModal from '../../components/AuthModal';
+import UserWidget from '../../components/UserWidget';
 
 // Language to Compiler/Interpreter version mapping
 const COMPILERS = {
@@ -43,10 +43,6 @@ export default function CodeBeaconDebugger() {
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
-
-  // --- Auth Modal State ---
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const [isSignUpMode, setIsSignUpMode] = useState(false);
 
   const history: any[] = [];
 
@@ -95,13 +91,6 @@ export default function CodeBeaconDebugger() {
       className="flex h-screen w-full bg-black text-gray-200 font-sans overflow-hidden relative"
       onMouseMove={handleMouseMove}
     >
-      {/* --- AUTH MODAL --- */}
-      <AuthModal 
-        isOpen={isAuthModalOpen} 
-        onClose={() => setIsAuthModalOpen(false)} 
-        defaultIsSignUp={isSignUpMode} 
-      />
-
       {/* --- AESTHETIC BACKGROUND WITH PARALLAX --- */}
       <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
         <div 
@@ -177,24 +166,8 @@ export default function CodeBeaconDebugger() {
           </div>
           
           <div className="flex items-center space-x-5">
-            <button 
-              onClick={() => {
-                setIsSignUpMode(false);
-                setIsAuthModalOpen(true);
-              }}
-              className="text-sm font-medium text-gray-400 hover:text-white transition-colors"
-            >
-              Log in
-            </button>
-            <button 
-              onClick={() => {
-                setIsSignUpMode(true);
-                setIsAuthModalOpen(true);
-              }}
-              className="text-sm font-medium bg-white/10 hover:bg-white text-white hover:text-black border border-white/20 px-5 py-1.5 rounded-full transition-all duration-300"
-            >
-              Sign up
-            </button>
+            {/* The UserWidget completely handles the Auth Modal now! */}
+            <UserWidget />
           </div>
         </header>
 
