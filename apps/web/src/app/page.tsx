@@ -1,10 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import UserWidget from '../../components/UserWidget';
 
-// Language to Compiler/Interpreter version mapping
 const COMPILERS = {
   cpp: ["GNU G++ 14.1 (C++23)", "GNU G++ 11.4 (C++17)", "Clang 18.1"],
   py: ["Python 3.12.3", "Python 3.11.9", "Python 3.10.14"],
@@ -13,7 +12,6 @@ const COMPILERS = {
   rs: ["Rust 1.78.0", "Rust 1.75.0"],
 };
 
-// Map file extensions to readable names for the dropdown
 const LANGUAGE_NAMES = {
   cpp: "C++",
   py: "Python",
@@ -22,7 +20,6 @@ const LANGUAGE_NAMES = {
   rs: "Rust"
 };
 
-// Map your state keys to exact Monaco Editor language IDs
 const MONACO_LANGUAGES = {
   cpp: "cpp",
   py: "python",
@@ -41,10 +38,21 @@ export default function CodeBeaconDebugger() {
   const [result, setResult] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   
+  const [editorTheme, setEditorTheme] = useState('vs-dark');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
   const history: any[] = [];
+
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [isFullscreen]);
 
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLang = e.target.value as keyof typeof COMPILERS;
@@ -86,12 +94,44 @@ export default function CodeBeaconDebugger() {
     setMouse({ offsetX, offsetY, clientX, clientY });
   };
 
+  const handleEditorWillMount = (monaco: any) => {
+    monaco.editor.defineTheme('vscode-dark-plus', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'keyword', foreground: '569cd6' },
+        { token: 'identifier', foreground: '9cdcfe' },
+        { token: 'type', foreground: '4ec9b0' },
+        { token: 'class', foreground: '4ec9b0' },
+        { token: 'interface', foreground: '4ec9b0' },
+        { token: 'string', foreground: 'ce9178' },
+        { token: 'number', foreground: 'b5cea8' },
+        { token: 'comment', foreground: '6a9955' },
+        { token: 'constant', foreground: '4fc1ff' },
+        { token: 'operator', foreground: 'd4d4d4' },
+        { token: 'delimiter', foreground: 'd4d4d4' },
+      ],
+      colors: {
+        // THE FIX: Reverted to a solid color so Monaco can wipe the canvas cleanly during animations
+        'editor.background': '#0a0a0a',
+        'editor.foreground': '#d4d4d4',
+        'editorLineNumber.foreground': '#858585',
+        'editorCursor.foreground': '#c6c6c6',
+        'editor.selectionBackground': '#264f78',
+        'editor.lineHighlightBackground': '#1c1f24',
+      },
+    });
+  };
+
+  const handleEditorDidMount = () => {
+    setEditorTheme('vscode-dark-plus');
+  };
+
   return (
     <div 
       className="flex h-screen w-full bg-black text-gray-200 font-sans overflow-hidden relative"
       onMouseMove={handleMouseMove}
     >
-      {/* --- AESTHETIC BACKGROUND WITH PARALLAX --- */}
       <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
         <div 
           className="absolute inset-[-50px] bg-[radial-gradient(rgba(59,130,246,0.8)_1px,transparent_1px)] [background-size:20px_20px] blur-[2px] opacity-30 transition-transform duration-75 ease-out"
@@ -104,7 +144,6 @@ export default function CodeBeaconDebugger() {
         <div className="absolute top-[-10%] left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-blue-600/15 blur-[120px] rounded-full"></div>
       </div>
 
-      {/* --- SIDEBAR --- */}
       <div 
         className={`relative z-20 flex flex-col bg-[#0a0a0a]/90 backdrop-blur-xl transition-all duration-300 ease-in-out overflow-hidden whitespace-nowrap flex-shrink-0 ${
           isSidebarOpen ? 'w-72 opacity-100 border-r border-gray-800/60' : 'w-0 opacity-0 border-none'
@@ -124,24 +163,20 @@ export default function CodeBeaconDebugger() {
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 flex flex-col items-center justify-center text-center">
-            {history.length === 0 ? (
+            {history.length === 0 && (
               <div className="text-gray-500 space-y-3">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 mx-auto opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                 </svg>
                 <p className="text-sm">No recent scans.<br/>Your history will appear here.</p>
               </div>
-            ) : (
-              null
             )}
           </div>
         </div>
       </div>
 
-      {/* --- MAIN CONTENT LAYOUT --- */}
       <div className="relative z-10 flex-1 flex flex-col min-w-0 h-screen overflow-y-auto transition-all duration-300">
         
-        {/* Top Navigation Bar */}
         <header className="flex items-center justify-between px-6 py-4 border-b border-gray-800/60 bg-black/40 backdrop-blur-md sticky top-0 z-30">
           <div className="flex items-center space-x-4">
             <button 
@@ -164,23 +199,19 @@ export default function CodeBeaconDebugger() {
               </h1>
             </div>
           </div>
-          
           <div className="flex items-center space-x-5">
-            {/* The UserWidget completely handles the Auth Modal now! */}
             <UserWidget />
           </div>
         </header>
 
-        {/* Editor Wrapper */}
         <main className="flex-1 flex flex-col items-center justify-center py-10 px-4 sm:px-6 lg:px-8 w-full max-w-5xl mx-auto">
           
-          <div className="w-full bg-[#0d0d0d]/80 backdrop-blur-xl border border-gray-800/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col relative">
+          <div className={`w-full flex flex-col relative transition-all duration-300 ${isFullscreen ? 'z-[100]' : 'z-10'}`}>
             
-            {/* Environment Settings Bar */}
-            <div className="flex items-center justify-between bg-black/50 px-6 py-4 border-b border-gray-800/60">
+            <div className="absolute inset-0 bg-[#0d0d0d]/80 backdrop-blur-xl border border-gray-800/80 rounded-2xl shadow-2xl pointer-events-none -z-10"></div>
+
+            <div className="flex items-center justify-between bg-black/50 px-6 py-4 border-b border-gray-800/60 rounded-t-2xl">
               <div className="flex items-center space-x-4">
-                
-                {/* Language Dropdown */}
                 <div className="relative">
                   <select
                     value={language}
@@ -196,7 +227,6 @@ export default function CodeBeaconDebugger() {
                   </div>
                 </div>
 
-                {/* Version Dropdown */}
                 <div className="relative">
                   <select
                     value={version}
@@ -211,49 +241,87 @@ export default function CodeBeaconDebugger() {
                     <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
                   </div>
                 </div>
-
               </div>
             </div>
 
-            {/* Title & Monaco Editor Area */}
             <div className="p-6 relative flex flex-col flex-1">
-              {/* Mandatory Title Input */}
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Snippet Title (e.g., Dijkstra's Algorithm Optimization)..."
-                className="w-full bg-transparent text-xl font-bold text-white placeholder-gray-600 focus:outline-none border-b border-gray-800 focus:border-blue-500 pb-3 mb-4 transition-colors relative z-10"
-              />
+              
+              {isFullscreen && <div className="h-[400px] w-full pointer-events-none"></div>}
 
-              {/* Monaco Editor Component */}
-              <div className="w-full h-[350px] relative z-10 rounded-lg overflow-hidden border border-gray-800/50">
-                <Editor
-                  height="100%"
-                  language={MONACO_LANGUAGES[language]}
-                  theme="vs-dark"
-                  value={code}
-                  onChange={(value: string | undefined) => setCode(value || '')}
-                  options={{
-                    minimap: { enabled: false }, // Hides the mini-map to save space
-                    fontSize: 14,
-                    padding: { top: 16 },
-                    scrollBeyondLastLine: false,
-                    smoothScrolling: true,
-                    cursorBlinking: "smooth",
-                    cursorSmoothCaretAnimation: "on",
-                    formatOnPaste: true,
-                  }}
-                  loading={
-                    <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-                      Initializing Editor...
-                    </div>
-                  }
-                />
+              <div 
+                className={`flex flex-col origin-center transition-all duration-700 ease-[cubic-bezier(0.23,1,0.32,1)] ${
+                  isFullscreen 
+                    ? 'fixed inset-0 z-[9999] bg-black/60 backdrop-blur-md p-6 sm:p-10 animate-in zoom-in-75' 
+                    : 'relative w-full z-20 bg-transparent'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-4 w-full">
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Snippet Title (e.g., Dijkstra's Algorithm Optimization)..."
+                    className="flex-1 bg-transparent text-xl font-bold text-white placeholder-gray-600 focus:outline-none border-b border-gray-800 focus:border-blue-500 pb-3 transition-colors mr-6"
+                  />
+                  
+                  <button 
+                    onClick={() => setIsFullscreen(!isFullscreen)}
+                    className="flex-shrink-0 p-2.5 bg-[#141414] hover:bg-[#1f1f1f] text-gray-400 hover:text-white rounded-lg border border-gray-800 transition-transform duration-300 hover:scale-110 focus:outline-none focus:ring-1 focus:ring-gray-600"
+                    title={isFullscreen ? "Exit Full Screen" : "Enter Full Screen"}
+                  >
+                    {isFullscreen ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="4 14 10 14 10 20" />
+                        <polyline points="20 10 14 10 14 4" />
+                        <line x1="14" y1="10" x2="21" y2="3" />
+                        <line x1="3" y1="21" x2="10" y2="14" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="15 3 21 3 21 9" />
+                        <polyline points="9 21 3 21 3 15" />
+                        <line x1="21" y1="3" x2="14" y2="10" />
+                        <line x1="3" y1="21" x2="10" y2="14" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+
+                <div className={`relative w-full transition-all duration-700 ${
+                  isFullscreen ? 'flex-1 rounded-xl overflow-hidden border border-gray-700/60 shadow-2xl' : 'h-[350px] rounded-lg overflow-hidden border border-gray-800/50'
+                }`}>
+                  <Editor
+                    height="100%"
+                    language={MONACO_LANGUAGES[language]}
+                    theme={editorTheme} 
+                    value={code}
+                    onChange={(value: string | undefined) => setCode(value || '')}
+                    beforeMount={handleEditorWillMount}
+                    onMount={handleEditorDidMount}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 15,
+                      fontFamily: "'Fira Code', 'JetBrains Mono', 'Consolas', monospace",
+                      fontLigatures: true,
+                      padding: { top: 20 },
+                      scrollBeyondLastLine: false,
+                      smoothScrolling: true,
+                      cursorBlinking: "smooth",
+                      cursorSmoothCaretAnimation: "on",
+                      formatOnPaste: true,
+                      automaticLayout: true,
+                    }}
+                    loading={
+                      <div className="flex items-center justify-center h-full text-gray-500 text-sm">
+                        Initializing Editor...
+                      </div>
+                    }
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="px-6 py-5 flex justify-between items-center bg-black/30 border-t border-gray-800/60 relative z-10">
+            <div className="px-6 py-5 flex justify-between items-center bg-black/30 border-t border-gray-800/60 relative z-10 rounded-b-2xl">
               <div className="flex-1 flex items-center space-x-3">
                 {!title.trim() && (
                   <span className="text-xs text-yellow-500/80 font-medium tracking-wide flex items-center">

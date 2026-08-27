@@ -46,7 +46,7 @@ export default function UserWidget() {
     return () => subscription.unsubscribe();
   }, [supabase.auth]);
 
-  // Premium feature: Close dropdown when clicking outside of it
+  // Close dropdown when clicking outside of it
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -67,17 +67,16 @@ export default function UserWidget() {
     setIsAuthModalOpen(true);
   };
 
-  const avatarUrl = user?.user_metadata?.avatar_url;
+  // Check both avatar_url (GitHub/Discord) and picture (Google)
+  const avatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
   const userName = user?.user_metadata?.full_name || user?.user_metadata?.user_name || 'Developer';
   const userEmail = user?.email;
 
   if (loading) return <div className="w-20 h-10 animate-pulse bg-gray-800 rounded-lg"></div>;
 
   return (
-    // The relative wrapper ensures the dropdown positions itself perfectly under the avatar
     <div className="relative" ref={dropdownRef}>
       
-      {/* --- Logged Out View: Buttons --- */}
       {!user ? (
         <div className="flex items-center space-x-4">
           <button 
@@ -94,17 +93,17 @@ export default function UserWidget() {
           </button>
         </div>
       ) : (
-        /* --- Logged In View: Avatar & Dropdown --- */
         <div>
           <button 
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-            className="w-10 h-10 rounded-full overflow-hidden border-2 border-gray-700 hover:border-blue-500 transition-colors shadow-lg focus:outline-none"
+            className="w-10 h-10 rounded-full overflow-hidden border-2 border-gray-700 hover:border-blue-500 transition-colors shadow-lg focus:outline-none flex items-center justify-center bg-[#141414]"
           >
             {avatarUrl && !imgError ? (
               <img 
                 src={avatarUrl} 
                 alt="Profile" 
-                className="w-full h-full object-cover" 
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
                 onError={() => setImgError(true)} 
               />
             ) : (
@@ -112,17 +111,14 @@ export default function UserWidget() {
             )}
           </button>
 
-          {/* The Sleek Floating Dropdown Menu */}
           {isDropdownOpen && (
             <div className="absolute right-0 mt-3 w-64 bg-[#0a0a0a] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
               
-              {/* User Identity Header */}
               <div className="p-4 border-b border-gray-800 bg-[#141414]">
                 <p className="text-sm font-semibold text-white truncate">{userName}</p>
                 <p className="text-xs text-gray-500 truncate mt-0.5">{userEmail}</p>
               </div>
               
-              {/* Menu Options */}
               <div className="p-2 flex flex-col space-y-1">
                 <button className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-gray-300 hover:bg-[#1f1f1f] hover:text-white transition-colors text-left">
                   <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
@@ -134,7 +130,6 @@ export default function UserWidget() {
                 </button>
               </div>
 
-              {/* Sign Out Action */}
               <div className="p-2 border-t border-gray-800">
                 <button onClick={handleSignOut} className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-red-400 hover:bg-red-950/30 hover:text-red-300 transition-colors text-left">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
@@ -147,7 +142,6 @@ export default function UserWidget() {
         </div>
       )}
 
-      {/* --- The Auth Modal --- */}
       <AuthModal 
         isOpen={isAuthModalOpen} 
         onClose={() => setIsAuthModalOpen(false)} 
