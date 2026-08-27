@@ -222,6 +222,9 @@ importers:
       '@auth/drizzle-adapter':
         specifier: ^1.11.3
         version: 1.11.3
+      monaco-editor:
+        specifier: 0.43.0
+        version: 0.43.0
       next:
         specifier: 16.2.12
         version: 16.2.12(@babel/core@7.29.7(supports-color@7.2.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -2413,6 +2416,9 @@ packages:
 
   minimist@1.2.8:
     resolution: {integrity: sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==}
+
+  monaco-editor@0.43.0:
+    resolution: {integrity: sha512-cnoqwQi/9fml2Szamv1XbSJieGJ1Dc8tENVMD26Kcfl7xGQWp7OBKMjlwKVGYFJ3/AXJjSOGvcqK7Ry/j9BM1Q==}
 
   monaco-editor@0.56.0:
     resolution: {integrity: sha512-sXboRm3BeBeLm938eaiyLMe0OxzfXIlZvbv4ir/jVgQy1zDhWjgmny0WoN45fuDKhCCQsYMbBJrv/A6jd8aCUg==}
@@ -5015,6 +5021,8 @@ snapshots:
       brace-expansion: 2.1.4
 
   minimist@1.2.8: {}
+
+  monaco-editor@0.43.0: {}
 
   monaco-editor@0.56.0:
     dependencies:

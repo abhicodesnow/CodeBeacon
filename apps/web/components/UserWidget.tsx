@@ -3,8 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { createClient } from '../utils/supabase/client';
 import AuthModal from './AuthModal';
+import ProfileSettingsModal from './ProfileSettingsModal';
 
-// Sleek anonymous avatar fallback
 const DefaultAvatar = () => (
   <div className="w-full h-full bg-[#141414] flex items-center justify-center">
     <svg className="w-3/5 h-3/5 text-gray-500" fill="currentColor" viewBox="0 0 24 24">
@@ -13,13 +13,22 @@ const DefaultAvatar = () => (
   </div>
 );
 
-export default function UserWidget() {
+// NEW: Accept Vim state props from page.tsx
+interface UserWidgetProps {
+  vimMode: boolean;
+  setVimMode: (val: boolean) => void;
+}
+
+export default function UserWidget({ vimMode, setVimMode }: UserWidgetProps) {
   const [user, setUser] = useState<any>(null);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [defaultIsSignUp, setDefaultIsSignUp] = useState(false);
   const [loading, setLoading] = useState(true);
   const [imgError, setImgError] = useState(false);
+  
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [profileModalTab, setProfileModalTab] = useState<'profile' | 'settings'>('profile');
   
   const dropdownRef = useRef<HTMLDivElement>(null);
   const supabase = createClient();
@@ -46,7 +55,6 @@ export default function UserWidget() {
     return () => subscription.unsubscribe();
   }, [supabase.auth]);
 
-  // Close dropdown when clicking outside of it
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -67,7 +75,12 @@ export default function UserWidget() {
     setIsAuthModalOpen(true);
   };
 
-  // Check both avatar_url (GitHub/Discord) and picture (Google)
+  const openProfileSettings = (tab: 'profile' | 'settings') => {
+    setProfileModalTab(tab);
+    setIsProfileModalOpen(true);
+    setIsDropdownOpen(false); 
+  };
+
   const avatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
   const userName = user?.user_metadata?.full_name || user?.user_metadata?.user_name || 'Developer';
   const userEmail = user?.email;
@@ -79,16 +92,10 @@ export default function UserWidget() {
       
       {!user ? (
         <div className="flex items-center space-x-4">
-          <button 
-            onClick={() => openAuthModal(false)} 
-            className="text-gray-300 hover:text-white font-medium transition-colors"
-          >
+          <button onClick={() => openAuthModal(false)} className="text-gray-300 hover:text-white font-medium transition-colors">
             Log In
           </button>
-          <button 
-            onClick={() => openAuthModal(true)} 
-            className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded-lg font-medium transition-all shadow-[0_0_15px_rgba(37,99,235,0.2)]"
-          >
+          <button onClick={() => openAuthModal(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded-lg font-medium transition-all shadow-[0_0_15px_rgba(37,99,235,0.2)]">
             Sign Up
           </button>
         </div>
@@ -99,13 +106,7 @@ export default function UserWidget() {
             className="w-10 h-10 rounded-full overflow-hidden border-2 border-gray-700 hover:border-blue-500 transition-colors shadow-lg focus:outline-none flex items-center justify-center bg-[#141414]"
           >
             {avatarUrl && !imgError ? (
-              <img 
-                src={avatarUrl} 
-                alt="Profile" 
-                className="w-full h-full object-cover"
-                referrerPolicy="no-referrer"
-                onError={() => setImgError(true)} 
-              />
+              <img src={avatarUrl} alt="Profile" className="w-full h-full object-cover" referrerPolicy="no-referrer" onError={() => setImgError(true)} />
             ) : (
               <DefaultAvatar />
             )}
@@ -113,18 +114,17 @@ export default function UserWidget() {
 
           {isDropdownOpen && (
             <div className="absolute right-0 mt-3 w-64 bg-[#0a0a0a] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
-              
               <div className="p-4 border-b border-gray-800 bg-[#141414]">
                 <p className="text-sm font-semibold text-white truncate">{userName}</p>
                 <p className="text-xs text-gray-500 truncate mt-0.5">{userEmail}</p>
               </div>
               
               <div className="p-2 flex flex-col space-y-1">
-                <button className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-gray-300 hover:bg-[#1f1f1f] hover:text-white transition-colors text-left">
+                <button onClick={() => openProfileSettings('profile')} className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-gray-300 hover:bg-[#1f1f1f] hover:text-white transition-colors text-left">
                   <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
                   <span>Profile</span>
                 </button>
-                <button className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-gray-300 hover:bg-[#1f1f1f] hover:text-white transition-colors text-left">
+                <button onClick={() => openProfileSettings('settings')} className="flex items-center space-x-3 w-full p-2.5 rounded-lg text-sm text-gray-300 hover:bg-[#1f1f1f] hover:text-white transition-colors text-left">
                   <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                   <span>Settings</span>
                 </button>
@@ -136,16 +136,21 @@ export default function UserWidget() {
                   <span>Sign Out</span>
                 </button>
               </div>
-
             </div>
           )}
         </div>
       )}
 
-      <AuthModal 
-        isOpen={isAuthModalOpen} 
-        onClose={() => setIsAuthModalOpen(false)} 
-        defaultIsSignUp={defaultIsSignUp} 
+      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} defaultIsSignUp={defaultIsSignUp} />
+      
+      {/* NEW: Pass the props down to the modal */}
+      <ProfileSettingsModal 
+        isOpen={isProfileModalOpen} 
+        onClose={() => setIsProfileModalOpen(false)} 
+        user={user} 
+        initialTab={profileModalTab} 
+        vimMode={vimMode}
+        setVimMode={setVimMode}
       />
     </div>
   );

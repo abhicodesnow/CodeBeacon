@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import UserWidget from '../../components/UserWidget';
 
@@ -41,6 +41,11 @@ export default function CodeBeaconDebugger() {
   const [editorTheme, setEditorTheme] = useState('vs-dark');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  
+  const [vimMode, setVimMode] = useState(false);
+  const [vimState, setVimState] = useState<'NORMAL' | 'INSERT'>('INSERT');
+  const editorRef = useRef<any>(null);
+  
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
   const history: any[] = [];
@@ -53,6 +58,20 @@ export default function CodeBeaconDebugger() {
     }
     return () => { document.body.style.overflow = ''; };
   }, [isFullscreen]);
+
+  // Native robust Vim mode state toggler using Monaco keybindings
+  useEffect(() => {
+    if (!editorRef.current) return;
+    const editor = editorRef.current;
+
+    if (vimMode) {
+      setVimState('NORMAL');
+      editor.updateOptions({ cursorStyle: 'block' });
+    } else {
+      setVimState('INSERT');
+      editor.updateOptions({ cursorStyle: 'line' });
+    }
+  }, [vimMode]);
 
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLang = e.target.value as keyof typeof COMPILERS;
@@ -112,7 +131,6 @@ export default function CodeBeaconDebugger() {
         { token: 'delimiter', foreground: 'd4d4d4' },
       ],
       colors: {
-        // THE FIX: Reverted to a solid color so Monaco can wipe the canvas cleanly during animations
         'editor.background': '#0a0a0a',
         'editor.foreground': '#d4d4d4',
         'editorLineNumber.foreground': '#858585',
@@ -123,8 +141,27 @@ export default function CodeBeaconDebugger() {
     });
   };
 
-  const handleEditorDidMount = () => {
+  const handleEditorDidMount = (editor: any, monaco: any) => {
     setEditorTheme('vscode-dark-plus');
+    editorRef.current = editor;
+
+    // Intercept keystrokes when Vim mode is enabled natively
+    editor.onKeyDown((e: any) => {
+      if (!vimMode) return;
+
+      // Pressing 'i' in Normal mode switches to Insert mode
+      if (vimState === 'NORMAL' && e.browserEvent.key === 'i') {
+        e.preventDefault();
+        setVimState('INSERT');
+        editor.updateOptions({ cursorStyle: 'line' });
+      } 
+      // Pressing 'Escape' in Insert mode switches back to Normal mode
+      else if (vimState === 'INSERT' && e.browserEvent.key === 'Escape') {
+        e.preventDefault();
+        setVimState('NORMAL');
+        editor.updateOptions({ cursorStyle: 'block' });
+      }
+    });
   };
 
   return (
@@ -200,7 +237,7 @@ export default function CodeBeaconDebugger() {
             </div>
           </div>
           <div className="flex items-center space-x-5">
-            <UserWidget />
+            <UserWidget vimMode={vimMode} setVimMode={setVimMode} />
           </div>
         </header>
 
@@ -266,7 +303,7 @@ export default function CodeBeaconDebugger() {
                   
                   <button 
                     onClick={() => setIsFullscreen(!isFullscreen)}
-                    className="flex-shrink-0 p-2.5 bg-[#141414] hover:bg-[#1f1f1f] text-gray-400 hover:text-white rounded-lg border border-gray-800 transition-transform duration-300 hover:scale-110 focus:outline-none focus:ring-1 focus:ring-gray-600"
+                    className={`flex-shrink-0 p-2.5 bg-[#141414] hover:bg-[#1f1f1f] text-gray-400 hover:text-white rounded-lg border border-gray-800 transition-transform duration-700 hover:scale-110 focus:outline-none focus:ring-1 focus:ring-gray-600`}
                     title={isFullscreen ? "Exit Full Screen" : "Enter Full Screen"}
                   >
                     {isFullscreen ? (
@@ -329,6 +366,13 @@ export default function CodeBeaconDebugger() {
                     Title required for analysis
                   </span>
                 )}
+                
+                {vimMode && (
+                  <div className="font-mono text-[10px] font-bold text-blue-400 tracking-widest ml-4 bg-blue-900/20 px-2 py-1 rounded">
+                    --{vimState}--
+                  </div>
+                )}
+                
                 {error && <p className="text-red-400 text-sm font-medium">{error}</p>}
               </div>
               
