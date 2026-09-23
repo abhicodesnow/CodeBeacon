@@ -1,10 +1,11 @@
-import { pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid, real } from 'drizzle-orm/pg-core';
 
-export const users = pgTable("users", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  email: text("email").notNull().unique(),
-  name: text("name"),
-  avatarUrl: text("avatar_url"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+export const snippets = pgTable('snippets', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull(), // This maps to Supabase's auth.users.id
+  title: text('title').notNull(),
+  code: text('code').notNull(),
+  language: text('language').notNull(),
+  bugProbability: real('bug_probability').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 });

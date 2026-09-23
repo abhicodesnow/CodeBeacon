@@ -4,7 +4,8 @@ import type { Config } from "drizzle-kit";
 export default {
   schema: "./src/schema.ts",
   out: "./drizzle",
+  driver: 'pg',
   dbCredentials: {
-    url: process.env.DATABASE_URL || "postgres://postgres:password@localhost:5432/codebeacon",
+    connectionString: process.env.DATABASE_URL || "postgres://postgres:password@localhost:5432/codebeacon",
   },
 } satisfies Config;

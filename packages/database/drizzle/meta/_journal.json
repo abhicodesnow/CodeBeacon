@@ -8,6 +8,13 @@
       "when": 1785579236639,
       "tag": "0000_gigantic_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1789237146453,
+      "tag": "0001_bizarre_avengers",
+      "breakpoints": true
     }
   ]
 }

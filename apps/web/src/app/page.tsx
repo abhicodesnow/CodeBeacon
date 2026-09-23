@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import UserWidget from '../../components/UserWidget';
+import { saveSnippetAnalysis, getSnippetHistory } from './actions';
+import { createClient } from '../../utils/supabase/client';
 
 const COMPILERS = {
   cpp: ["GNU G++ 14.1 (C++23)", "GNU G++ 11.4 (C++17)", "Clang 18.1"],
@@ -48,7 +50,39 @@ export default function CodeBeaconDebugger() {
   
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
-  const history: any[] = [];
+  // Database & Session State
+  const [history, setHistory] = useState<any[]>([]);
+  const [sessionUser, setSessionUser] = useState<any>(null);
+  const supabase = createClient();
+
+  // Initial Data Fetch & Auth Listener
+  useEffect(() => {
+    const initData = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        setSessionUser(session.user);
+        const dbHistory = await getSnippetHistory();
+        setHistory(dbHistory);
+      }
+    };
+    initData();
+
+    // Listen for auth events (login/logout) to refresh sidebar automatically
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        setSessionUser(session.user);
+        const dbHistory = await getSnippetHistory();
+        setHistory(dbHistory);
+      } else {
+        setSessionUser(null);
+        setHistory([]);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (isFullscreen) {
@@ -97,8 +131,24 @@ export default function CodeBeaconDebugger() {
 
       if (!response.ok) throw new Error('Failed to connect to the AI engine.');
 
-      const data = await response.json();
-      setResult(data.data.bug_probability);
+      const responseData = await response.json();
+      const riskScore = responseData.data.bug_probability;
+      setResult(riskScore);
+
+      // Save to Database if logged in
+      if (sessionUser) {
+        await saveSnippetAnalysis({
+          title,
+          code,
+          language,
+          bugProbability: riskScore
+        });
+        
+        // Refresh the sidebar history to show the new scan
+        const updatedHistory = await getSnippetHistory();
+        setHistory(updatedHistory);
+      }
+
     } catch (err) {
       setError('Analysis failed. Ensure your backend is running.');
     } finally {
@@ -199,13 +249,27 @@ export default function CodeBeaconDebugger() {
             </button>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4 flex flex-col items-center justify-center text-center">
-            {history.length === 0 && (
-              <div className="text-gray-500 space-y-3">
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col">
+            {history.length === 0 ? (
+              <div className="text-gray-500 space-y-3 p-4 text-center mt-10">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 mx-auto opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                 </svg>
                 <p className="text-sm">No recent scans.<br/>Your history will appear here.</p>
+              </div>
+            ) : (
+              <div className="w-full flex flex-col space-y-3">
+                {history.map((item) => (
+                  <div key={item.id} className="p-4 bg-[#111] border border-gray-800/60 rounded-xl hover:bg-[#1a1a1a] cursor-pointer transition-colors text-left flex flex-col group">
+                    <h4 className="text-sm font-semibold text-gray-200 truncate group-hover:text-blue-400 transition-colors">{item.title}</h4>
+                    <div className="flex justify-between items-center mt-3">
+                      <span className="text-[10px] uppercase font-bold text-gray-500 bg-gray-800/50 px-2 py-1 rounded">{item.language}</span>
+                      <span className={`text-[11px] font-bold ${item.bugProbability > 50 ? 'text-red-400' : item.bugProbability > 20 ? 'text-yellow-400' : 'text-green-400'}`}>
+                        {item.bugProbability}% Risk
+                      </span>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
