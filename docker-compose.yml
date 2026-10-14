@@ -1,8 +1,8 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15-alpine
+    container_name: codebeacon-postgres-1
+    restart: always
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -10,20 +10,14 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - codebeacon_net
+      - pgdata:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
+    container_name: codebeacon-redis-1
+    restart: always
     ports:
       - "6379:6379"
-    networks:
-      - codebeacon_net
-
-networks:
-  codebeacon_net:
-    driver: bridge
 
 volumes:
-  postgres_data:
+  pgdata:

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import UserWidget from '../../components/UserWidget';
-import { saveSnippetAnalysis, getSnippetHistory } from './actions';
+import { saveSnippetAnalysis, getSnippetHistory, deleteSnippet } from './actions';
 import { createClient } from '../../utils/supabase/client';
 
 const COMPILERS = {
@@ -30,6 +30,26 @@ const MONACO_LANGUAGES = {
   rs: "rust"
 };
 
+interface ForensicsMetrics {
+  bug_probability: number;
+  maintainability_index?: number;
+  cyclomatic_complexity?: number;
+  max_nesting_depth?: number;
+  loc?: number;
+  time_complexity?: string;
+  space_complexity?: string;
+  warnings?: string[];
+  ai_review?: string;
+}
+
+interface ExecutionResult {
+  status: 'success' | 'compile_error' | 'runtime_error' | 'tle' | 'system_error';
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  exec_time_ms: number;
+}
+
 export default function CodeBeaconDebugger() {
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
@@ -37,8 +57,14 @@ export default function CodeBeaconDebugger() {
   const [version, setVersion] = useState(COMPILERS['cpp'][0]);
   
   const [loading, setLoading] = useState(false);
+  const [executing, setExecuting] = useState(false);
   const [result, setResult] = useState<number | null>(null);
+  const [forensics, setForensics] = useState<ForensicsMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [stdin, setStdin] = useState('');
+  const [execResult, setExecResult] = useState<ExecutionResult | null>(null);
   
   const [editorTheme, setEditorTheme] = useState('vs-dark');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -46,41 +72,66 @@ export default function CodeBeaconDebugger() {
   
   const [vimMode, setVimMode] = useState(false);
   const [vimState, setVimState] = useState<'NORMAL' | 'INSERT'>('INSERT');
+  const vimModeRef = useRef(vimMode);
+  const vimStateRef = useRef(vimState);
   const editorRef = useRef<any>(null);
   
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
-  // Database & Session State
   const [history, setHistory] = useState<any[]>([]);
   const [sessionUser, setSessionUser] = useState<any>(null);
-  const supabase = createClient();
 
-  // Initial Data Fetch & Auth Listener
   useEffect(() => {
+    vimModeRef.current = vimMode;
+  }, [vimMode]);
+
+  useEffect(() => {
+    vimStateRef.current = vimState;
+  }, [vimState]);
+
+  // Safe client-only Supabase & History initialization
+  useEffect(() => {
+    let subscription: { unsubscribe: () => void } | null = null;
+
     const initData = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        setSessionUser(session.user);
-        const dbHistory = await getSnippetHistory();
-        setHistory(dbHistory);
+      try {
+        const supabase = createClient();
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          setSessionUser(session.user);
+          try {
+            const dbHistory = await getSnippetHistory();
+            setHistory(dbHistory || []);
+          } catch (dbErr) {
+            console.warn('Database history fetch skipped:', dbErr);
+          }
+        }
+
+        const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
+          if (session?.user) {
+            setSessionUser(session.user);
+            try {
+              const dbHistory = await getSnippetHistory();
+              setHistory(dbHistory || []);
+            } catch (dbErr) {
+              console.warn('Database history refresh skipped:', dbErr);
+            }
+          } else {
+            setSessionUser(null);
+            setHistory([]);
+          }
+        });
+
+        subscription = authListener.subscription;
+      } catch (err) {
+        console.warn('Supabase client init warning:', err);
       }
     };
+
     initData();
 
-    // Listen for auth events (login/logout) to refresh sidebar automatically
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
-        setSessionUser(session.user);
-        const dbHistory = await getSnippetHistory();
-        setHistory(dbHistory);
-      } else {
-        setSessionUser(null);
-        setHistory([]);
-      }
-    });
-
     return () => {
-      authListener.subscription.unsubscribe();
+      if (subscription) subscription.unsubscribe();
     };
   }, []);
 
@@ -93,17 +144,16 @@ export default function CodeBeaconDebugger() {
     return () => { document.body.style.overflow = ''; };
   }, [isFullscreen]);
 
-  // Native robust Vim mode state toggler using Monaco keybindings
   useEffect(() => {
     if (!editorRef.current) return;
     const editor = editorRef.current;
 
     if (vimMode) {
       setVimState('NORMAL');
-      editor.updateOptions({ cursorStyle: 'block' });
+      editor.updateOptions({ cursorStyle: 'block', readOnly: true });
     } else {
       setVimState('INSERT');
-      editor.updateOptions({ cursorStyle: 'line' });
+      editor.updateOptions({ cursorStyle: 'line', readOnly: false });
     }
   }, [vimMode]);
 
@@ -113,12 +163,84 @@ export default function CodeBeaconDebugger() {
     setVersion(COMPILERS[newLang][0]); 
   };
 
+  const handleLoadHistoryItem = (item: any) => {
+    setTitle(item.title || 'Untitled Scan');
+    setCode(item.code || '');
+    if (item.language in COMPILERS) {
+      const langKey = item.language as keyof typeof COMPILERS;
+      setLanguage(langKey);
+      setVersion(COMPILERS[langKey][0]);
+    }
+    setResult(item.bugProbability);
+    setForensics({
+      bug_probability: item.bugProbability,
+      maintainability_index: item.maintainabilityIndex ?? undefined,
+      cyclomatic_complexity: item.cyclomaticComplexity ?? undefined,
+      time_complexity: item.timeComplexity ?? undefined,
+      space_complexity: item.spaceComplexity ?? undefined,
+      warnings: item.warnings ?? undefined,
+      ai_review: item.aiReview ?? undefined,
+    });
+  };
+
+  const handleDeleteHistoryItem = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      await deleteSnippet(id);
+      setHistory((prev) => prev.filter((item) => item.id !== id));
+    } catch (err) {
+      console.error('Failed to delete snippet:', err);
+    }
+  };
+
+  const handleExecuteCode = async () => {
+    if (!code.trim()) {
+      setError('Paste or write some code in the editor first to run it.');
+      return;
+    }
+    setError(null);
+    setShowTerminal(true);
+    setExecuting(true);
+    setExecResult(null);
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, language, stdin }),
+      });
+
+      if (!response.ok) throw new Error('Sandbox execution failed.');
+      const data: ExecutionResult = await response.json();
+      setExecResult(data);
+    } catch (err) {
+      setExecResult({
+        status: 'system_error',
+        stdout: '',
+        stderr: 'Failed to reach the execution sandbox on port 8000. Make sure uvicorn is running.',
+        exit_code: 1,
+        exec_time_ms: 0,
+      });
+    } finally {
+      setExecuting(false);
+    }
+  };
+
   const handleAnalyze = async () => {
-    if (!code.trim() || !title.trim()) return;
+    if (!code.trim()) {
+      setError('Please enter some code in the editor before running diagnostics.');
+      return;
+    }
+
+    const effectiveTitle = title.trim() || `Untitled ${LANGUAGE_NAMES[language]} Snippet`;
+    if (!title.trim()) {
+      setTitle(effectiveTitle);
+    }
     
     setLoading(true);
     setError(null);
     setResult(null);
+    setForensics(null);
 
     try {
       const response = await fetch('http://127.0.0.1:8000/analyze', {
@@ -132,25 +254,35 @@ export default function CodeBeaconDebugger() {
       if (!response.ok) throw new Error('Failed to connect to the AI engine.');
 
       const responseData = await response.json();
-      const riskScore = responseData.data.bug_probability;
+      const metrics: ForensicsMetrics = responseData.data;
+      const riskScore = metrics.bug_probability;
       setResult(riskScore);
+      setForensics(metrics);
 
-      // Save to Database if logged in
       if (sessionUser) {
-        await saveSnippetAnalysis({
-          title,
-          code,
-          language,
-          bugProbability: riskScore
-        });
-        
-        // Refresh the sidebar history to show the new scan
-        const updatedHistory = await getSnippetHistory();
-        setHistory(updatedHistory);
+        try {
+          await saveSnippetAnalysis({
+            title: effectiveTitle,
+            code,
+            language,
+            bugProbability: riskScore,
+            maintainabilityIndex: metrics.maintainability_index,
+            cyclomaticComplexity: metrics.cyclomatic_complexity,
+            timeComplexity: metrics.time_complexity,
+            spaceComplexity: metrics.space_complexity,
+            warnings: metrics.warnings,
+            aiReview: metrics.ai_review,
+          });
+          
+          const updatedHistory = await getSnippetHistory();
+          setHistory(updatedHistory || []);
+        } catch (dbErr) {
+          console.warn('Could not save snippet to DB (run npx drizzle-kit push:pg):', dbErr);
+        }
       }
 
     } catch (err) {
-      setError('Analysis failed. Ensure your backend is running.');
+      setError('Analysis failed. Ensure your FastAPI backend is running on port 8000.');
     } finally {
       setLoading(false);
     }
@@ -191,25 +323,23 @@ export default function CodeBeaconDebugger() {
     });
   };
 
-  const handleEditorDidMount = (editor: any, monaco: any) => {
+  const handleEditorDidMount = (editor: any) => {
     setEditorTheme('vscode-dark-plus');
     editorRef.current = editor;
 
-    // Intercept keystrokes when Vim mode is enabled natively
     editor.onKeyDown((e: any) => {
-      if (!vimMode) return;
+      if (!vimModeRef.current) return;
 
-      // Pressing 'i' in Normal mode switches to Insert mode
-      if (vimState === 'NORMAL' && e.browserEvent.key === 'i') {
+      if (vimStateRef.current === 'NORMAL' && e.browserEvent.key === 'i') {
         e.preventDefault();
+        e.stopPropagation();
         setVimState('INSERT');
-        editor.updateOptions({ cursorStyle: 'line' });
-      } 
-      // Pressing 'Escape' in Insert mode switches back to Normal mode
-      else if (vimState === 'INSERT' && e.browserEvent.key === 'Escape') {
+        editor.updateOptions({ cursorStyle: 'line', readOnly: false });
+      } else if (vimStateRef.current === 'INSERT' && e.browserEvent.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation();
         setVimState('NORMAL');
-        editor.updateOptions({ cursorStyle: 'block' });
+        editor.updateOptions({ cursorStyle: 'block', readOnly: true });
       }
     });
   };
@@ -221,27 +351,28 @@ export default function CodeBeaconDebugger() {
     >
       <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
         <div 
-          className="absolute inset-[-50px] bg-[radial-gradient(rgba(59,130,246,0.8)_1px,transparent_1px)] [background-size:20px_20px] blur-[2px] opacity-30 transition-transform duration-75 ease-out"
+          className="absolute inset-[-50px] bg-[radial-gradient(rgba(59,130,246,0.8)_1px,transparent_1px)] [background-size:20px_20px] blur-[2px] opacity-30 transition-transform duration-75 ease-out pointer-events-none"
           style={{ transform: `translate(${mouse.offsetX * 0.5}px, ${mouse.offsetY * 0.5}px)` }}
         ></div>
         <div 
-          className="absolute inset-[-50px] bg-[radial-gradient(#4a4a4a_1px,transparent_1px)] [background-size:20px_20px] opacity-70 transition-transform duration-75 ease-out"
+          className="absolute inset-[-50px] bg-[radial-gradient(#4a4a4a_1px,transparent_1px)] [background-size:20px_20px] opacity-70 transition-transform duration-75 ease-out pointer-events-none"
           style={{ transform: `translate(${mouse.offsetX}px, ${mouse.offsetY}px)` }}
         ></div>
-        <div className="absolute top-[-10%] left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-blue-600/15 blur-[120px] rounded-full"></div>
+        <div className="absolute top-[-10%] left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-blue-600/15 blur-[120px] rounded-full pointer-events-none"></div>
       </div>
 
       <div 
         className={`relative z-20 flex flex-col bg-[#0a0a0a]/90 backdrop-blur-xl transition-all duration-300 ease-in-out overflow-hidden whitespace-nowrap flex-shrink-0 ${
-          isSidebarOpen ? 'w-72 opacity-100 border-r border-gray-800/60' : 'w-0 opacity-0 border-none'
+          isSidebarOpen ? 'w-72 opacity-100 border-r border-gray-800/60 pointer-events-auto' : 'w-0 opacity-0 border-none pointer-events-none'
         }`}
       >
         <div className="w-72 flex flex-col h-full">
           <div className="flex items-center justify-between p-5 border-b border-gray-800/60">
             <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Analysis History</h2>
             <button 
+              type="button"
               onClick={() => setIsSidebarOpen(false)}
-              className="text-gray-500 hover:text-white transition-colors"
+              className="text-gray-500 hover:text-white transition-colors cursor-pointer"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -260,8 +391,24 @@ export default function CodeBeaconDebugger() {
             ) : (
               <div className="w-full flex flex-col space-y-3">
                 {history.map((item) => (
-                  <div key={item.id} className="p-4 bg-[#111] border border-gray-800/60 rounded-xl hover:bg-[#1a1a1a] cursor-pointer transition-colors text-left flex flex-col group">
-                    <h4 className="text-sm font-semibold text-gray-200 truncate group-hover:text-blue-400 transition-colors">{item.title}</h4>
+                  <div
+                    key={item.id}
+                    onClick={() => handleLoadHistoryItem(item)}
+                    className="p-4 bg-[#111] border border-gray-800/60 rounded-xl hover:bg-[#1a1a1a] hover:border-blue-500/40 cursor-pointer transition-all text-left flex flex-col group relative"
+                  >
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-semibold text-gray-200 truncate group-hover:text-blue-400 transition-colors pr-6">{item.title}</h4>
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteHistoryItem(e, item.id)}
+                        className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-opacity p-1 cursor-pointer"
+                        title="Delete snippet"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
                     <div className="flex justify-between items-center mt-3">
                       <span className="text-[10px] uppercase font-bold text-gray-500 bg-gray-800/50 px-2 py-1 rounded">{item.language}</span>
                       <span className={`text-[11px] font-bold ${item.bugProbability > 50 ? 'text-red-400' : item.bugProbability > 20 ? 'text-yellow-400' : 'text-green-400'}`}>
@@ -281,8 +428,9 @@ export default function CodeBeaconDebugger() {
         <header className="flex items-center justify-between px-6 py-4 border-b border-gray-800/60 bg-black/40 backdrop-blur-md sticky top-0 z-30">
           <div className="flex items-center space-x-4">
             <button 
+              type="button"
               onClick={() => setIsSidebarOpen((prev) => !prev)}
-              className="text-gray-400 hover:text-white transition-colors focus:outline-none p-1 -ml-1"
+              className="text-gray-400 hover:text-white transition-colors focus:outline-none p-1 -ml-1 cursor-pointer"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
@@ -343,6 +491,14 @@ export default function CodeBeaconDebugger() {
                   </div>
                 </div>
               </div>
+
+              <button
+                type="button"
+                onClick={() => setShowTerminal((prev) => !prev)}
+                className="text-xs font-semibold text-gray-300 hover:text-white bg-[#161616] hover:bg-[#222] border border-gray-700 px-3.5 py-2 rounded-lg transition-colors cursor-pointer"
+              >
+                {showTerminal ? "Hide I/O Terminal" : "Open I/O Terminal"}
+              </button>
             </div>
 
             <div className="p-6 relative flex flex-col flex-1">
@@ -352,7 +508,7 @@ export default function CodeBeaconDebugger() {
               <div 
                 className={`flex flex-col origin-center transition-all duration-700 ease-[cubic-bezier(0.23,1,0.32,1)] ${
                   isFullscreen 
-                    ? 'fixed inset-0 z-[9999] bg-black/60 backdrop-blur-md p-6 sm:p-10 animate-in zoom-in-75' 
+                    ? 'fixed inset-0 z-[9999] bg-black/90 backdrop-blur-md p-6 sm:p-10' 
                     : 'relative w-full z-20 bg-transparent'
                 }`}
               >
@@ -366,8 +522,9 @@ export default function CodeBeaconDebugger() {
                   />
                   
                   <button 
+                    type="button"
                     onClick={() => setIsFullscreen(!isFullscreen)}
-                    className={`flex-shrink-0 p-2.5 bg-[#141414] hover:bg-[#1f1f1f] text-gray-400 hover:text-white rounded-lg border border-gray-800 transition-transform duration-700 hover:scale-110 focus:outline-none focus:ring-1 focus:ring-gray-600`}
+                    className="flex-shrink-0 p-2.5 bg-[#141414] hover:bg-[#1f1f1f] text-gray-400 hover:text-white rounded-lg border border-gray-800 transition-transform duration-300 hover:scale-105 focus:outline-none cursor-pointer"
                     title={isFullscreen ? "Exit Full Screen" : "Enter Full Screen"}
                   >
                     {isFullscreen ? (
@@ -420,14 +577,44 @@ export default function CodeBeaconDebugger() {
                   />
                 </div>
               </div>
+
+              {showTerminal && (
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 bg-black/60 border border-gray-800/80 rounded-xl p-4 relative z-20">
+                  <div className="flex flex-col">
+                    <label className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-2">Custom Input (stdin)</label>
+                    <textarea
+                      value={stdin}
+                      onChange={(e) => setStdin(e.target.value)}
+                      placeholder="Paste competitive programming test case input here..."
+                      className="w-full h-28 bg-[#0a0a0a] border border-gray-800 rounded-lg p-3 text-xs font-mono text-gray-200 focus:outline-none focus:border-blue-500 resize-none"
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold uppercase tracking-wider text-gray-400">Sandbox Output (stdout / stderr)</label>
+                      {execResult && (
+                        <span className={`text-[11px] font-mono px-2 py-0.5 rounded ${execResult.status === 'success' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'}`}>
+                          {execResult.status.toUpperCase()} • {execResult.exec_time_ms} ms
+                        </span>
+                      )}
+                    </div>
+                    <pre className="w-full h-28 bg-[#0a0a0a] border border-gray-800 rounded-lg p-3 text-xs font-mono overflow-y-auto whitespace-pre-wrap text-gray-300">
+                      {executing
+                        ? "Compiling & running in isolated sandbox..."
+                        : execResult
+                        ? `${execResult.stdout}${execResult.stderr ? `\n\${execResult.stderr}` : ''}` || "(No output)"
+                        : "Click 'Run Code' to execute against stdin."}
+                    </pre>
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="px-6 py-5 flex justify-between items-center bg-black/30 border-t border-gray-800/60 relative z-10 rounded-b-2xl">
+            <div className="px-6 py-5 flex justify-between items-center bg-black/30 border-t border-gray-800/60 relative z-20 rounded-b-2xl">
               <div className="flex-1 flex items-center space-x-3">
                 {!title.trim() && (
-                  <span className="text-xs text-yellow-500/80 font-medium tracking-wide flex items-center">
-                    <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                    Title required for analysis
+                  <span className="text-xs text-gray-400 font-medium tracking-wide flex items-center">
+                    Tip: Add a title above (or we will auto-title it for you)
                   </span>
                 )}
                 
@@ -440,41 +627,96 @@ export default function CodeBeaconDebugger() {
                 {error && <p className="text-red-400 text-sm font-medium">{error}</p>}
               </div>
               
-              <button
-                onClick={handleAnalyze}
-                disabled={loading || !code.trim() || !title.trim()}
-                className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2.5 px-8 rounded-lg transition-all duration-300 shadow-[0_0_20px_rgba(37,99,235,0.2)] hover:shadow-[0_0_30px_rgba(37,99,235,0.4)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 border border-blue-500/50"
-              >
-                {loading ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <span>Extracting AST...</span>
-                  </>
-                ) : (
-                  <span>Run Diagnostics</span>
-                )}
-              </button>
+              <div className="flex items-center space-x-3">
+                <button
+                  type="button"
+                  onClick={handleExecuteCode}
+                  disabled={executing}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 px-6 rounded-lg transition-all duration-300 disabled:opacity-50 cursor-pointer flex items-center space-x-2 border border-emerald-500/50"
+                >
+                  <span>{executing ? "Running..." : "Run Code"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleAnalyze}
+                  disabled={loading}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2.5 px-8 rounded-lg transition-all duration-300 shadow-[0_0_20px_rgba(37,99,235,0.2)] hover:shadow-[0_0_30px_rgba(37,99,235,0.4)] disabled:opacity-50 cursor-pointer flex items-center space-x-2 border border-blue-500/50"
+                >
+                  {loading ? (
+                    <>
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      <span>Extracting AST...</span>
+                    </>
+                  ) : (
+                    <span>Run Diagnostics</span>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 
           {result !== null && (
-            <div className={`mt-8 max-w-xl w-full border ${result > 50 ? 'border-red-900/50 bg-red-900/10 shadow-[0_0_30px_rgba(185,28,28,0.1)]' : result > 20 ? 'border-yellow-900/50 bg-yellow-900/10 shadow-[0_0_30px_rgba(202,138,4,0.1)]' : 'border-green-900/50 bg-green-900/10 shadow-[0_0_30px_rgba(21,128,61,0.1)]'} rounded-2xl p-6 flex flex-col items-center justify-center text-center transition-all animate-in fade-in slide-in-from-bottom-4 duration-500 backdrop-blur-sm relative z-10`}>
-              <h3 className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Model Prediction Score</h3>
-              <div className="flex items-baseline space-x-1">
-                <span className={`text-6xl font-black tracking-tighter ${result > 50 ? 'text-red-500' : result > 20 ? 'text-yellow-500' : 'text-green-500'}`}>
-                  {result}%
-                </span>
+            <div className="mt-8 w-full border border-gray-800/80 bg-[#0d0d0d]/90 rounded-2xl p-6 transition-all duration-500 backdrop-blur-md relative z-20 space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className={`p-5 rounded-xl border text-center ${result > 50 ? 'border-red-900/50 bg-red-900/10' : result > 20 ? 'border-yellow-900/50 bg-yellow-900/10' : 'border-green-900/50 bg-green-900/10'}`}>
+                  <h3 className="text-gray-400 text-[11px] font-bold uppercase tracking-widest mb-1">Bug Probability</h3>
+                  <span className={`text-4xl font-black tracking-tight ${result > 50 ? 'text-red-500' : result > 20 ? 'text-yellow-500' : 'text-green-500'}`}>
+                    {result}%
+                  </span>
+                </div>
+
+                <div className="p-5 rounded-xl border border-gray-800/80 bg-black/40 text-center">
+                  <h3 className="text-gray-400 text-[11px] font-bold uppercase tracking-widest mb-1">Maintainability</h3>
+                  <span className="text-4xl font-black tracking-tight text-blue-400">
+                    {forensics?.maintainability_index !== undefined ? `${forensics.maintainability_index}` : 'N/A'}
+                  </span>
+                </div>
+
+                <div className="p-5 rounded-xl border border-gray-800/80 bg-black/40 text-center">
+                  <h3 className="text-gray-400 text-[11px] font-bold uppercase tracking-widest mb-1">Cyclomatic Complexity</h3>
+                  <span className="text-4xl font-black tracking-tight text-purple-400">
+                    {forensics?.cyclomatic_complexity ?? 'N/A'}
+                  </span>
+                  {forensics?.max_nesting_depth !== undefined && (
+                    <p className="text-xs text-gray-500 mt-1">Nesting Depth: {forensics.max_nesting_depth}</p>
+                  )}
+                </div>
+
+                <div className="p-5 rounded-xl border border-gray-800/80 bg-black/40 text-center">
+                  <h3 className="text-gray-400 text-[11px] font-bold uppercase tracking-widest mb-1">Estimated Big-O</h3>
+                  <span className="text-2xl font-black tracking-tight text-emerald-400 block mt-1">
+                    {forensics?.time_complexity ?? 'O(N)'}
+                  </span>
+                  <p className="text-xs text-gray-500 mt-1">Space: {forensics?.space_complexity ?? 'O(1)'}</p>
+                </div>
               </div>
-              <p className="mt-3 text-sm text-gray-300 max-w-md">
-                {result > 50 
-                  ? "High risk detected. The cyclomatic complexity is likely too high." 
-                  : result > 20 
-                  ? "Moderate risk. Consider refactoring for better readability." 
-                  : "Syntax parsed successfully. Code is structurally sound."}
-              </p>
+
+              {forensics?.warnings && forensics.warnings.length > 0 && (
+                <div className="border-t border-gray-800/80 pt-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-3">Static & AST Forensics</h4>
+                  <ul className="space-y-2">
+                    {forensics.warnings.map((warn, idx) => (
+                      <li key={idx} className="text-sm text-gray-300 flex items-start space-x-2 bg-black/40 px-3.5 py-2.5 rounded-lg border border-gray-800/50">
+                        <span className="text-blue-400 font-bold">•</span>
+                        <span>{warn}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {forensics?.ai_review && (
+                <div className="border-t border-gray-800/80 pt-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-purple-400 mb-2">Llama 3 Diagnostic Review</h4>
+                  <div className="text-sm text-gray-300 bg-purple-950/15 border border-purple-800/40 rounded-xl p-4 whitespace-pre-wrap">
+                    {forensics.ai_review}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
