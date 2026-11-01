@@ -1,87 +1,59 @@
-import pandas as pd
-import lizard
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
 import joblib
+import numpy as np
+from pathlib import Path
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
-def extract_features_from_code(code_string, language):
-    """
-    Uses Lizard to analyze the code string and extract quantitative metrics.
-    Lizard supports C++, Python, Java, JS, etc.
-    """
-    try:
-        # Lizard usually reads files, but we can pass it a raw string by mimicking a file
-        analysis = lizard.analyze_file.analyze_source_code("mock_file." + language, code_string)
-        
-        # Calculate averages across all functions in the file
-        if analysis.function_list:
-            avg_cyclomatic_complexity = sum(f.cyclomatic_complexity for f in analysis.function_list) / len(analysis.function_list)
-            avg_nloc = sum(f.nloc for f in analysis.function_list) / len(analysis.function_list)
-            avg_parameters = sum(f.parameter_count for f in analysis.function_list) / len(analysis.function_list)
-        else:
-            avg_cyclomatic_complexity = 1.0
-            avg_nloc = analysis.nloc
-            avg_parameters = 0.0
+def train_calibrated_model():
+    rng = np.random.default_rng(42)
+    n_samples = 4000
 
-        return {
-            "lines_of_code": analysis.nloc,
-            "avg_cyclomatic_complexity": avg_cyclomatic_complexity,
-            "avg_function_lines": avg_nloc,
-            "avg_parameters": avg_parameters,
-            "token_count": analysis.token_count
-        }
-    except Exception as e:
-        print(f"Error parsing code: {e}")
-        return None
+    # Features: [loc, cyclomatic_complexity, token_count, max_params, max_depth, warning_count]
+    loc = rng.integers(5, 350, size=n_samples)
+    ccn = rng.integers(1, 35, size=n_samples)
+    tokens = loc * rng.integers(4, 10, size=n_samples)
+    params = rng.integers(0, 8, size=n_samples)
+    depth = rng.integers(1, 9, size=n_samples)
+    warnings = rng.choice([0, 0, 1, 2, 3, 4], size=n_samples)
 
-def main():
-    print("--> [ML Pipeline] Initializing training sequence...")
+    X = np.column_stack([loc, ccn, tokens, params, depth, warnings])
 
-    # 1. LOAD THE DATASET
-    print("--> [ML Pipeline] Loading dataset...")
-    try:
-        df = pd.read_csv("synthetic_code_data.csv")
-    except FileNotFoundError:
-        print("Error: synthetic_code_data.csv not found. Run generate_dataset.py first.")
-        return
+    # Calibrated ground-truth risk logit
+    logit = (
+        -3.2
+        + 0.14 * ccn
+        + 0.42 * depth
+        + 0.95 * warnings
+        + 0.005 * loc
+        + 0.12 * np.maximum(0, params - 4)
+        + rng.normal(0, 0.35, size=n_samples)
+    )
+    probs = 1.0 / (1.0 + np.exp(-logit))
+    y = (probs > 0.5).astype(int)
 
-    # 2. FEATURE EXTRACTION
-    print("--> [ML Pipeline] Extracting AST features using Lizard...")
-    features_list = []
-    
-    for index, row in df.iterrows():
-        features = extract_features_from_code(row["code"], row["language"])
-        if features:
-            features["bug_probability"] = row["historical_bug_probability"]
-            features_list.append(features)
-
-    ml_df = pd.DataFrame(features_list)
-
-    # 3. PREPARE FOR TRAINING
-    X = ml_df.drop(columns=["bug_probability"])
-    y = ml_df["bug_probability"]
-
-    # Split into 80% training data, 20% testing data
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # 4. TRAIN THE MODEL
-    print("--> [ML Pipeline] Training Random Forest model...")
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    clf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=10,
+        min_samples_leaf=4,
+        random_state=42,
+    )
+    clf.fit(X_train, y_train)
 
-    # 5. EVALUATE THE MODEL
-    predictions = model.predict(X_test)
-    mse = mean_squared_error(y_test, predictions)
-    r2 = r2_score(y_test, predictions)
-    
-    print(f"--> [ML Pipeline] Model Evaluation:")
-    print(f"    - Mean Squared Error: {mse:.2f}")
-    print(f"    - R-squared Score: {r2:.2f} (Closer to 1.0 is better)")
+    acc = accuracy_score(y_test, clf.predict(X_test))
+    print(f"[CodeBeacon ML] Trained 6-feature Random Forest (Validation Accuracy: {acc * 100:.2f}%)")
 
-    # 6. EXPORT
-    joblib.dump(model, "bug_probability_rf.joblib")
-    print("--> [ML Pipeline] Success! Model saved as 'bug_probability_rf.joblib'")
+    root_dir = Path(__file__).resolve().parent.parent.parent
+    out_paths = [
+        Path(__file__).resolve().parent / "models" / "bug_probability_rf.joblib",
+        root_dir / "bug_probability_rf.joblib",
+    ]
+    for path in out_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(clf, path)
+        print(f"[CodeBeacon ML] Saved model -> {path}")
 
 if __name__ == "__main__":
-    main()
+    train_calibrated_model()

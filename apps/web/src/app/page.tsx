@@ -30,14 +30,39 @@ const MONACO_LANGUAGES = {
   rs: "rust"
 };
 
+interface FunctionHotspot {
+  name: string;
+  cyclomatic_complexity: number;
+  nloc: number;
+  tokens: number;
+  params: number;
+  start_line: number;
+  end_line: number;
+}
+
+interface DiagnosticItem {
+  line: number;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+}
+
 interface ForensicsMetrics {
   bug_probability: number;
   maintainability_index?: number;
   cyclomatic_complexity?: number;
   max_nesting_depth?: number;
   loc?: number;
+  token_count?: number;
   time_complexity?: string;
   space_complexity?: string;
+  functions?: FunctionHotspot[];
+  diagnostics?: DiagnosticItem[];
+  risk_breakdown?: {
+    cyclomatic_complexity: number;
+    nesting_depth: number;
+    static_hazards: number;
+    code_volume: number;
+  };
   warnings?: string[];
   ai_review?: string;
 }
@@ -75,6 +100,7 @@ export default function CodeBeaconDebugger() {
   const vimModeRef = useRef(vimMode);
   const vimStateRef = useRef(vimState);
   const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
   
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
@@ -89,33 +115,34 @@ export default function CodeBeaconDebugger() {
     vimStateRef.current = vimState;
   }, [vimState]);
 
-  // Safe client-only Supabase & History initialization
   useEffect(() => {
+    let isMounted = true;
     let subscription: { unsubscribe: () => void } | null = null;
 
     const initData = async () => {
       try {
         const supabase = createClient();
         const { data: { session } } = await supabase.auth.getSession();
+        if (!isMounted) return;
+
         if (session?.user) {
           setSessionUser(session.user);
-          try {
-            const dbHistory = await getSnippetHistory();
-            setHistory(dbHistory || []);
-          } catch (dbErr) {
-            console.warn('Database history fetch skipped:', dbErr);
-          }
+          getSnippetHistory()
+            .then((dbHistory) => {
+              if (isMounted) setHistory(dbHistory || []);
+            })
+            .catch((err) => console.warn('History fetch skipped:', err));
         }
 
         const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
+          if (!isMounted) return;
           if (session?.user) {
             setSessionUser(session.user);
-            try {
-              const dbHistory = await getSnippetHistory();
-              setHistory(dbHistory || []);
-            } catch (dbErr) {
-              console.warn('Database history refresh skipped:', dbErr);
-            }
+            getSnippetHistory()
+              .then((dbHistory) => {
+                if (isMounted) setHistory(dbHistory || []);
+              })
+              .catch(() => {});
           } else {
             setSessionUser(null);
             setHistory([]);
@@ -124,13 +151,14 @@ export default function CodeBeaconDebugger() {
 
         subscription = authListener.subscription;
       } catch (err) {
-        console.warn('Supabase client init warning:', err);
+        console.warn('Supabase init skipped:', err);
       }
     };
 
     initData();
 
     return () => {
+      isMounted = false;
       if (subscription) subscription.unsubscribe();
     };
   }, []);
@@ -157,10 +185,52 @@ export default function CodeBeaconDebugger() {
     }
   }, [vimMode]);
 
+  // Sync forensics diagnostics into inline Monaco squiggly markers
+  useEffect(() => {
+    if (!editorRef.current || !monacoRef.current) return;
+    const model = editorRef.current.getModel();
+    if (!model) return;
+
+    if (!forensics?.diagnostics || forensics.diagnostics.length === 0) {
+      monacoRef.current.editor.setModelMarkers(model, 'codebeacon', []);
+      return;
+    }
+
+    const markers = forensics.diagnostics.map((d) => {
+      const lineCount = model.getLineCount();
+      const safeLine = Math.min(Math.max(1, d.line), lineCount);
+      const maxCol = model.getLineMaxColumn(safeLine);
+      const severity =
+        d.severity === 'error'
+          ? monacoRef.current.MarkerSeverity.Error
+          : d.severity === 'warning'
+          ? monacoRef.current.MarkerSeverity.Warning
+          : monacoRef.current.MarkerSeverity.Info;
+
+      return {
+        startLineNumber: safeLine,
+        startColumn: 1,
+        endLineNumber: safeLine,
+        endColumn: maxCol,
+        message: d.message,
+        severity,
+      };
+    });
+
+    monacoRef.current.editor.setModelMarkers(model, 'codebeacon', markers);
+  }, [forensics]);
+
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLang = e.target.value as keyof typeof COMPILERS;
     setLanguage(newLang);
     setVersion(COMPILERS[newLang][0]); 
+  };
+
+  const handleJumpToLine = (line: number) => {
+    if (!editorRef.current) return;
+    editorRef.current.revealLineInCenter(line);
+    editorRef.current.setPosition({ lineNumber: line, column: 1 });
+    editorRef.current.focus();
   };
 
   const handleLoadHistoryItem = (item: any) => {
@@ -277,7 +347,7 @@ export default function CodeBeaconDebugger() {
           const updatedHistory = await getSnippetHistory();
           setHistory(updatedHistory || []);
         } catch (dbErr) {
-          console.warn('Could not save snippet to DB (run npx drizzle-kit push:pg):', dbErr);
+          console.warn('Could not save snippet to DB:', dbErr);
         }
       }
 
@@ -296,6 +366,7 @@ export default function CodeBeaconDebugger() {
   };
 
   const handleEditorWillMount = (monaco: any) => {
+    monacoRef.current = monaco;
     monaco.editor.defineTheme('vscode-dark-plus', {
       base: 'vs-dark',
       inherit: true,
@@ -323,9 +394,10 @@ export default function CodeBeaconDebugger() {
     });
   };
 
-  const handleEditorDidMount = (editor: any) => {
+  const handleEditorDidMount = (editor: any, monaco: any) => {
     setEditorTheme('vscode-dark-plus');
     editorRef.current = editor;
+    if (monaco) monacoRef.current = monaco;
 
     editor.onKeyDown((e: any) => {
       if (!vimModeRef.current) return;
@@ -465,7 +537,7 @@ export default function CodeBeaconDebugger() {
                   <select
                     value={language}
                     onChange={handleLanguageChange}
-                    className="appearance-none bg-[#1a1a1a] border border-gray-700 text-gray-200 text-sm font-medium rounded-md pl-4 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors cursor-pointer"
+                    className="appearance-none bg-[#1a1a1a] border border-gray-700 text-gray-200 text-sm font-medium rounded-md pl-4 pr-10 py-2 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
                   >
                     {Object.entries(LANGUAGE_NAMES).map(([key, name]) => (
                       <option key={key} value={key}>{name}</option>
@@ -480,7 +552,7 @@ export default function CodeBeaconDebugger() {
                   <select
                     value={version}
                     onChange={(e) => setVersion(e.target.value)}
-                    className="appearance-none bg-[#1a1a1a] border border-gray-700 text-gray-400 text-sm font-medium rounded-md pl-4 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors cursor-pointer"
+                    className="appearance-none bg-[#1a1a1a] border border-gray-700 text-gray-400 text-sm font-medium rounded-md pl-4 pr-10 py-2 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
                   >
                     {COMPILERS[language].map((ver) => (
                       <option key={ver} value={ver}>{ver}</option>
@@ -602,7 +674,7 @@ export default function CodeBeaconDebugger() {
                       {executing
                         ? "Compiling & running in isolated sandbox..."
                         : execResult
-                        ? `${execResult.stdout}${execResult.stderr ? `\n\${execResult.stderr}` : ''}` || "(No output)"
+                        ? `${execResult.stdout}${execResult.stderr ? `\n${execResult.stderr}` : ''}` || "(No output)"
                         : "Click 'Run Code' to execute against stdin."}
                     </pre>
                   </div>
@@ -674,6 +746,9 @@ export default function CodeBeaconDebugger() {
                   <span className="text-4xl font-black tracking-tight text-blue-400">
                     {forensics?.maintainability_index !== undefined ? `${forensics.maintainability_index}` : 'N/A'}
                   </span>
+                  {forensics?.loc !== undefined && (
+                    <p className="text-xs text-gray-500 mt-1">{forensics.loc} NLOC • {forensics.token_count ?? 0} Tokens</p>
+                  )}
                 </div>
 
                 <div className="p-5 rounded-xl border border-gray-800/80 bg-black/40 text-center">
@@ -694,6 +769,88 @@ export default function CodeBeaconDebugger() {
                   <p className="text-xs text-gray-500 mt-1">Space: {forensics?.space_complexity ?? 'O(1)'}</p>
                 </div>
               </div>
+
+              {forensics?.risk_breakdown && (
+                <div className="border-t border-gray-800/80 pt-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-3">ML Risk Attribution Breakdown</h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="bg-black/40 border border-gray-800/60 rounded-lg p-3">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-gray-400">Branching (CCN)</span>
+                        <span className="text-purple-400 font-bold">{forensics.risk_breakdown.cyclomatic_complexity}%</span>
+                      </div>
+                      <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-purple-500 h-full" style={{ width: `${forensics.risk_breakdown.cyclomatic_complexity}%` }}></div>
+                      </div>
+                    </div>
+                    <div className="bg-black/40 border border-gray-800/60 rounded-lg p-3">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-gray-400">Nesting Depth</span>
+                        <span className="text-yellow-400 font-bold">{forensics.risk_breakdown.nesting_depth}%</span>
+                      </div>
+                      <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-yellow-500 h-full" style={{ width: `${forensics.risk_breakdown.nesting_depth}%` }}></div>
+                      </div>
+                    </div>
+                    <div className="bg-black/40 border border-gray-800/60 rounded-lg p-3">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-gray-400">Static Hazards</span>
+                        <span className="text-red-400 font-bold">{forensics.risk_breakdown.static_hazards}%</span>
+                      </div>
+                      <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-red-500 h-full" style={{ width: `${forensics.risk_breakdown.static_hazards}%` }}></div>
+                      </div>
+                    </div>
+                    <div className="bg-black/40 border border-gray-800/60 rounded-lg p-3">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-gray-400">Code Volume</span>
+                        <span className="text-blue-400 font-bold">{forensics.risk_breakdown.code_volume}%</span>
+                      </div>
+                      <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-blue-500 h-full" style={{ width: `${forensics.risk_breakdown.code_volume}%` }}></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {forensics?.functions && forensics.functions.length > 0 && (
+                <div className="border-t border-gray-800/80 pt-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-3">Function-Level AST Hotspots (Click to Jump)</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-gray-800 text-gray-400 uppercase">
+                          <th className="py-2 px-3">Function</th>
+                          <th className="py-2 px-3">Lines</th>
+                          <th className="py-2 px-3">CCN</th>
+                          <th className="py-2 px-3">NLOC</th>
+                          <th className="py-2 px-3">Tokens</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800/50">
+                        {forensics.functions.map((fn, i) => (
+                          <tr
+                            key={i}
+                            onClick={() => handleJumpToLine(fn.start_line)}
+                            className="hover:bg-blue-950/20 cursor-pointer transition-colors"
+                          >
+                            <td className="py-2.5 px-3 font-mono font-semibold text-blue-400">{fn.name}</td>
+                            <td className="py-2.5 px-3 font-mono text-gray-400">L{fn.start_line}–L{fn.end_line}</td>
+                            <td className="py-2.5 px-3">
+                              <span className={`px-2 py-0.5 rounded font-bold ${fn.cyclomatic_complexity > 10 ? 'bg-red-900/30 text-red-400' : 'bg-green-900/30 text-green-400'}`}>
+                                {fn.cyclomatic_complexity}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-gray-300">{fn.nloc}</td>
+                            <td className="py-2.5 px-3 text-gray-400">{fn.tokens}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {forensics?.warnings && forensics.warnings.length > 0 && (
                 <div className="border-t border-gray-800/80 pt-4">
