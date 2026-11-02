@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import UserWidget from '../../components/UserWidget';
 import { saveSnippetAnalysis, getSnippetHistory, deleteSnippet } from './actions';
@@ -28,6 +28,15 @@ const MONACO_LANGUAGES = {
   java: "java",
   js: "javascript",
   rs: "rust"
+};
+
+const EXTENSION_TO_LANGUAGE: Record<string, keyof typeof COMPILERS> = {
+  '.cpp': 'cpp',
+  '.py': 'py',
+  '.java': 'java',
+  '.js': 'js',
+  '.rs': 'rs',
+  '.rust': 'rs',
 };
 
 interface FunctionHotspot {
@@ -75,6 +84,24 @@ interface ExecutionResult {
   exec_time_ms: number;
 }
 
+async function postBackend(endpoint: string, payload: unknown) {
+  try {
+    const res = await fetch(`/api/backend${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) return res;
+  } catch {
+    // Fallback to direct localhost call if Next.js rewrite isn't active yet
+  }
+  return fetch(`http://127.0.0.1:8000${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 export default function CodeBeaconDebugger() {
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
@@ -86,6 +113,7 @@ export default function CodeBeaconDebugger() {
   const [result, setResult] = useState<number | null>(null);
   const [forensics, setForensics] = useState<ForensicsMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   const [showTerminal, setShowTerminal] = useState(false);
   const [stdin, setStdin] = useState('');
@@ -101,6 +129,7 @@ export default function CodeBeaconDebugger() {
   const vimStateRef = useRef(vimState);
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   
   const [mouse, setMouse] = useState({ offsetX: 0, offsetY: 0, clientX: -1000, clientY: -1000 });
 
@@ -129,7 +158,7 @@ export default function CodeBeaconDebugger() {
           setSessionUser(session.user);
           getSnippetHistory()
             .then((dbHistory) => {
-              if (isMounted) setHistory(dbHistory || []);
+              if (isMounted && Array.isArray(dbHistory)) setHistory(dbHistory);
             })
             .catch((err) => console.warn('History fetch skipped:', err));
         }
@@ -140,7 +169,7 @@ export default function CodeBeaconDebugger() {
             setSessionUser(session.user);
             getSnippetHistory()
               .then((dbHistory) => {
-                if (isMounted) setHistory(dbHistory || []);
+                if (isMounted && Array.isArray(dbHistory)) setHistory(dbHistory);
               })
               .catch(() => {});
           } else {
@@ -175,50 +204,68 @@ export default function CodeBeaconDebugger() {
   useEffect(() => {
     if (!editorRef.current) return;
     const editor = editorRef.current;
-
-    if (vimMode) {
-      setVimState('NORMAL');
-      editor.updateOptions({ cursorStyle: 'block', readOnly: true });
-    } else {
-      setVimState('INSERT');
-      editor.updateOptions({ cursorStyle: 'line', readOnly: false });
+    try {
+      if (vimMode) {
+        setVimState('NORMAL');
+        editor.updateOptions({ cursorStyle: 'block', readOnly: true });
+      } else {
+        setVimState('INSERT');
+        editor.updateOptions({ cursorStyle: 'line', readOnly: false });
+      }
+    } catch {
+      // Ignore if editor is mid-mount
     }
   }, [vimMode]);
 
-  // Sync forensics diagnostics into inline Monaco squiggly markers
+  // Safe Monaco squiggly marker synchronization (guards against disposed models)
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current) return;
-    const model = editorRef.current.getModel();
-    if (!model) return;
 
-    if (!forensics?.diagnostics || forensics.diagnostics.length === 0) {
-      monacoRef.current.editor.setModelMarkers(model, 'codebeacon', []);
-      return;
-    }
+    const timer = setTimeout(() => {
+      try {
+        const editor = editorRef.current;
+        const monaco = monacoRef.current;
+        if (!editor || !monaco) return;
 
-    const markers = forensics.diagnostics.map((d) => {
-      const lineCount = model.getLineCount();
-      const safeLine = Math.min(Math.max(1, d.line), lineCount);
-      const maxCol = model.getLineMaxColumn(safeLine);
-      const severity =
-        d.severity === 'error'
-          ? monacoRef.current.MarkerSeverity.Error
-          : d.severity === 'warning'
-          ? monacoRef.current.MarkerSeverity.Warning
-          : monacoRef.current.MarkerSeverity.Info;
+        const model = editor.getModel?.();
+        if (!model || (typeof model.isDisposed === 'function' && model.isDisposed())) {
+          return;
+        }
 
-      return {
-        startLineNumber: safeLine,
-        startColumn: 1,
-        endLineNumber: safeLine,
-        endColumn: maxCol,
-        message: d.message,
-        severity,
-      };
-    });
+        if (!forensics?.diagnostics || forensics.diagnostics.length === 0) {
+          monaco.editor.setModelMarkers(model, 'codebeacon', []);
+          return;
+        }
 
-    monacoRef.current.editor.setModelMarkers(model, 'codebeacon', markers);
-  }, [forensics]);
+        const lineCount = Math.max(1, model.getLineCount());
+        const markers = forensics.diagnostics.map((d) => {
+          const safeLine = Math.min(Math.max(1, Number(d.line) || 1), lineCount);
+          const maxCol = Math.max(1, model.getLineMaxColumn(safeLine));
+          const severity =
+            d.severity === 'error'
+              ? (monaco.MarkerSeverity?.Error ?? 8)
+              : d.severity === 'warning'
+              ? (monaco.MarkerSeverity?.Warning ?? 4)
+              : (monaco.MarkerSeverity?.Info ?? 2);
+
+          return {
+            startLineNumber: safeLine,
+            startColumn: 1,
+            endLineNumber: safeLine,
+            endColumn: maxCol,
+            message: String(d.message || 'Diagnostic issue'),
+            severity,
+          };
+        });
+
+        monaco.editor.setModelMarkers(model, 'codebeacon', markers);
+      } catch (markerErr) {
+        console.warn('Skipped marker update during model transition:', markerErr);
+      }
+    }, 50);
+
+    return () => clearTimeout(timer);
+  }, [forensics, language]);
 
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLang = e.target.value as keyof typeof COMPILERS;
@@ -226,14 +273,96 @@ export default function CodeBeaconDebugger() {
     setVersion(COMPILERS[newLang][0]); 
   };
 
+  const processSelectedFile = (file: File) => {
+    const dotIndex = file.name.lastIndexOf('.');
+    const ext = dotIndex !== -1 ? file.name.slice(dotIndex).toLowerCase() : '';
+
+    if (!EXTENSION_TO_LANGUAGE[ext]) {
+      setError(`Unsupported file "${file.name}". Only .cpp, .py, .java, .js, .rs, and .rust files are allowed.`);
+      return;
+    }
+
+    const detectedLang = EXTENSION_TO_LANGUAGE[ext];
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+      const content = event.target?.result;
+      if (typeof content === 'string') {
+        setForensics(null);
+        setResult(null);
+        setError(null);
+        setLanguage(detectedLang);
+        setVersion(COMPILERS[detectedLang][0]);
+        setTitle(file.name);
+        setCode(content);
+      }
+    };
+
+    reader.onerror = () => {
+      setError(`Failed to read "${file.name}" from local storage.`);
+    };
+
+    reader.readAsText(file);
+  };
+
+  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processSelectedFile(file);
+    e.target.value = '';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingFile(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingFile(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingFile(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) processSelectedFile(file);
+  };
+
+  const handleExportReport = () => {
+    if (!forensics) return;
+    const reportPayload = {
+      title: title || 'Untitled Snippet',
+      language: LANGUAGE_NAMES[language],
+      compiler: version,
+      exportedAt: new Date().toISOString(),
+      metrics: forensics,
+      code,
+    };
+    const blob = new Blob([JSON.stringify(reportPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(title || 'codebeacon-report').replace(/[^a-z0-9_-]/gi, '_')}.forensics.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleJumpToLine = (line: number) => {
     if (!editorRef.current) return;
-    editorRef.current.revealLineInCenter(line);
-    editorRef.current.setPosition({ lineNumber: line, column: 1 });
-    editorRef.current.focus();
+    try {
+      editorRef.current.revealLineInCenter(line);
+      editorRef.current.setPosition({ lineNumber: line, column: 1 });
+      editorRef.current.focus();
+    } catch {
+      // Ignore if editor not ready
+    }
   };
 
   const handleLoadHistoryItem = (item: any) => {
+    setForensics(null);
     setTitle(item.title || 'Untitled Scan');
     setCode(item.code || '');
     if (item.language in COMPILERS) {
@@ -241,14 +370,15 @@ export default function CodeBeaconDebugger() {
       setLanguage(langKey);
       setVersion(COMPILERS[langKey][0]);
     }
-    setResult(item.bugProbability);
+    const prob = Number(item.bugProbability) || 0;
+    setResult(prob);
     setForensics({
-      bug_probability: item.bugProbability,
+      bug_probability: prob,
       maintainability_index: item.maintainabilityIndex ?? undefined,
       cyclomatic_complexity: item.cyclomaticComplexity ?? undefined,
       time_complexity: item.timeComplexity ?? undefined,
       space_complexity: item.spaceComplexity ?? undefined,
-      warnings: item.warnings ?? undefined,
+      warnings: Array.isArray(item.warnings) ? item.warnings : undefined,
       ai_review: item.aiReview ?? undefined,
     });
   };
@@ -265,7 +395,7 @@ export default function CodeBeaconDebugger() {
 
   const handleExecuteCode = async () => {
     if (!code.trim()) {
-      setError('Paste or write some code in the editor first to run it.');
+      setError('Paste or import some code in the editor first to run it.');
       return;
     }
     setError(null);
@@ -274,16 +404,11 @@ export default function CodeBeaconDebugger() {
     setExecResult(null);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, language, stdin }),
-      });
-
+      const response = await postBackend('/execute', { code, language, stdin });
       if (!response.ok) throw new Error('Sandbox execution failed.');
       const data: ExecutionResult = await response.json();
       setExecResult(data);
-    } catch (err) {
+    } catch {
       setExecResult({
         status: 'system_error',
         stdout: '',
@@ -298,7 +423,7 @@ export default function CodeBeaconDebugger() {
 
   const handleAnalyze = async () => {
     if (!code.trim()) {
-      setError('Please enter some code in the editor before running diagnostics.');
+      setError('Please enter or import some code in the editor before running diagnostics.');
       return;
     }
 
@@ -313,45 +438,39 @@ export default function CodeBeaconDebugger() {
     setForensics(null);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ code, language }), 
-      });
-
+      const response = await postBackend('/analyze', { code, language });
       if (!response.ok) throw new Error('Failed to connect to the AI engine.');
 
       const responseData = await response.json();
-      const metrics: ForensicsMetrics = responseData.data;
-      const riskScore = metrics.bug_probability;
+      const metrics: ForensicsMetrics | undefined = responseData?.data;
+      if (!metrics || typeof metrics.bug_probability !== 'number') {
+        throw new Error('Invalid diagnostic payload from backend.');
+      }
+
+      const riskScore = Math.round(metrics.bug_probability * 10) / 10;
       setResult(riskScore);
       setForensics(metrics);
 
       if (sessionUser) {
-        try {
-          await saveSnippetAnalysis({
-            title: effectiveTitle,
-            code,
-            language,
-            bugProbability: riskScore,
-            maintainabilityIndex: metrics.maintainability_index,
-            cyclomaticComplexity: metrics.cyclomatic_complexity,
-            timeComplexity: metrics.time_complexity,
-            spaceComplexity: metrics.space_complexity,
-            warnings: metrics.warnings,
-            aiReview: metrics.ai_review,
-          });
-          
+        const saved = await saveSnippetAnalysis({
+          title: effectiveTitle,
+          code,
+          language,
+          bugProbability: riskScore,
+          maintainabilityIndex: metrics.maintainability_index,
+          cyclomaticComplexity: metrics.cyclomatic_complexity,
+          timeComplexity: metrics.time_complexity,
+          spaceComplexity: metrics.space_complexity,
+          warnings: metrics.warnings,
+          aiReview: metrics.ai_review,
+        });
+
+        if (saved?.ok) {
           const updatedHistory = await getSnippetHistory();
-          setHistory(updatedHistory || []);
-        } catch (dbErr) {
-          console.warn('Could not save snippet to DB:', dbErr);
+          if (Array.isArray(updatedHistory)) setHistory(updatedHistory);
         }
       }
-
-    } catch (err) {
+    } catch {
       setError('Analysis failed. Ensure your FastAPI backend is running on port 8000.');
     } finally {
       setLoading(false);
@@ -527,12 +646,16 @@ export default function CodeBeaconDebugger() {
 
         <main className="flex-1 flex flex-col items-center justify-center py-10 px-4 sm:px-6 lg:px-8 w-full max-w-5xl mx-auto">
           
-          <div className={`w-full flex flex-col relative transition-all duration-300 ${isFullscreen ? 'z-[100]' : 'z-10'}`}>
-            
-            <div className="absolute inset-0 bg-[#0d0d0d]/80 backdrop-blur-xl border border-gray-800/80 rounded-2xl shadow-2xl pointer-events-none -z-10"></div>
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`w-full flex flex-col relative transition-all duration-300 ${isFullscreen ? 'z-[100]' : 'z-10'}`}
+          >
+            <div className={`absolute inset-0 bg-[#0d0d0d]/80 backdrop-blur-xl border rounded-2xl shadow-2xl pointer-events-none -z-10 transition-colors ${isDraggingFile ? 'border-blue-500 bg-blue-950/20' : 'border-gray-800/80'}`}></div>
 
-            <div className="flex items-center justify-between bg-black/50 px-6 py-4 border-b border-gray-800/60 rounded-t-2xl">
-              <div className="flex items-center space-x-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-black/50 px-6 py-4 border-b border-gray-800/60 rounded-t-2xl">
+              <div className="flex flex-wrap items-center gap-3">
                 <div className="relative">
                   <select
                     value={language}
@@ -562,6 +685,25 @@ export default function CodeBeaconDebugger() {
                     <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
                   </div>
                 </div>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".cpp,.py,.java,.js,.rs,.rust"
+                  onChange={handleFileImport}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center space-x-2 text-xs font-semibold text-gray-200 hover:text-white bg-[#1a1a1a] hover:bg-[#252525] border border-gray-700 hover:border-blue-500/60 px-3.5 py-2 rounded-md transition-colors cursor-pointer"
+                  title="Import or drag & drop a .cpp, .py, .java, .js, .rs, or .rust file"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  <span>Import File</span>
+                </button>
               </div>
 
               <button
@@ -580,7 +722,7 @@ export default function CodeBeaconDebugger() {
               <div 
                 className={`flex flex-col origin-center transition-all duration-700 ease-[cubic-bezier(0.23,1,0.32,1)] ${
                   isFullscreen 
-                    ? 'fixed inset-0 z-[9999] bg-black/90 backdrop-blur-md p-6 sm:p-10' 
+                    ? 'fixed inset-0 z-[9999] bg-black/95 backdrop-blur-md p-6 sm:p-10' 
                     : 'relative w-full z-20 bg-transparent'
                 }`}
               >
@@ -589,7 +731,7 @@ export default function CodeBeaconDebugger() {
                     type="text"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    placeholder="Snippet Title (e.g., Dijkstra's Algorithm Optimization)..."
+                    placeholder="Snippet Title (or drag & drop a .cpp / .py / .java / .js / .rs file)..."
                     className="flex-1 bg-transparent text-xl font-bold text-white placeholder-gray-600 focus:outline-none border-b border-gray-800 focus:border-blue-500 pb-3 transition-colors mr-6"
                   />
                   
@@ -684,9 +826,9 @@ export default function CodeBeaconDebugger() {
 
             <div className="px-6 py-5 flex justify-between items-center bg-black/30 border-t border-gray-800/60 relative z-20 rounded-b-2xl">
               <div className="flex-1 flex items-center space-x-3">
-                {!title.trim() && (
+                {!title.trim() && !error && (
                   <span className="text-xs text-gray-400 font-medium tracking-wide flex items-center">
-                    Tip: Add a title above (or we will auto-title it for you)
+                    Tip: Add a title above or import/drop a local code file
                   </span>
                 )}
                 
@@ -733,6 +875,20 @@ export default function CodeBeaconDebugger() {
 
           {result !== null && (
             <div className="mt-8 w-full border border-gray-800/80 bg-[#0d0d0d]/90 rounded-2xl p-6 transition-all duration-500 backdrop-blur-md relative z-20 space-y-6">
+              <div className="flex items-center justify-between border-b border-gray-800/80 pb-4">
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-gray-200">Forensics Report Card</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">{title || 'Untitled Snippet'} • {LANGUAGE_NAMES[language]}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleExportReport}
+                  className="text-xs font-semibold text-blue-400 hover:text-blue-300 bg-blue-950/30 hover:bg-blue-950/50 border border-blue-800/50 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                >
+                  Export JSON Report
+                </button>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className={`p-5 rounded-xl border text-center ${result > 50 ? 'border-red-900/50 bg-red-900/10' : result > 20 ? 'border-yellow-900/50 bg-yellow-900/10' : 'border-green-900/50 bg-green-900/10'}`}>
                   <h3 className="text-gray-400 text-[11px] font-bold uppercase tracking-widest mb-1">Bug Probability</h3>
