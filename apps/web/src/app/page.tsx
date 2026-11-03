@@ -93,7 +93,7 @@ async function postBackend(endpoint: string, payload: unknown) {
     });
     if (res.ok) return res;
   } catch {
-    // Fallback to direct localhost call if Next.js rewrite isn't active yet
+    // Fallback to direct localhost call
   }
   return fetch(`http://127.0.0.1:8000${endpoint}`, {
     method: 'POST',
@@ -110,6 +110,11 @@ export default function CodeBeaconDebugger() {
   
   const [loading, setLoading] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [refactoring, setRefactoring] = useState(false);
+  const [refactorSummary, setRefactorSummary] = useState<string | null>(null);
+  const [currentScanId, setCurrentScanId] = useState<string | null>(null);
+  const [copiedShareLink, setCopiedShareLink] = useState(false);
+
   const [result, setResult] = useState<number | null>(null);
   const [forensics, setForensics] = useState<ForensicsMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -217,7 +222,6 @@ export default function CodeBeaconDebugger() {
     }
   }, [vimMode]);
 
-  // Safe Monaco squiggly marker synchronization (guards against disposed models)
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current) return;
 
@@ -290,6 +294,8 @@ export default function CodeBeaconDebugger() {
       if (typeof content === 'string') {
         setForensics(null);
         setResult(null);
+        setCurrentScanId(null);
+        setRefactorSummary(null);
         setError(null);
         setLanguage(detectedLang);
         setVersion(COMPILERS[detectedLang][0]);
@@ -350,6 +356,37 @@ export default function CodeBeaconDebugger() {
     URL.revokeObjectURL(url);
   };
 
+  const handleCopyShareLink = () => {
+    if (!currentScanId) return;
+    const url = `${window.location.origin}/scan/${currentScanId}`;
+    navigator.clipboard.writeText(url);
+    setCopiedShareLink(true);
+    setTimeout(() => setCopiedShareLink(false), 2500);
+  };
+
+  const handleRefactorCode = async () => {
+    if (!code.trim()) return;
+    setRefactoring(true);
+    setRefactorSummary(null);
+    try {
+      const response = await postBackend('/refactor', {
+        code,
+        language,
+        warnings: forensics?.warnings || [],
+      });
+      if (!response.ok) throw new Error('Refactor request failed.');
+      const data = await response.json();
+      if (data.refactored_code) {
+        setCode(data.refactored_code);
+        setRefactorSummary(data.summary || 'Applied automated safety fixes.');
+      }
+    } catch {
+      setError('Could not run automated refactoring. Check backend status.');
+    } finally {
+      setRefactoring(false);
+    }
+  };
+
   const handleJumpToLine = (line: number) => {
     if (!editorRef.current) return;
     try {
@@ -363,6 +400,8 @@ export default function CodeBeaconDebugger() {
 
   const handleLoadHistoryItem = (item: any) => {
     setForensics(null);
+    setRefactorSummary(null);
+    setCurrentScanId(item.id || null);
     setTitle(item.title || 'Untitled Scan');
     setCode(item.code || '');
     if (item.language in COMPILERS) {
@@ -379,6 +418,9 @@ export default function CodeBeaconDebugger() {
       time_complexity: item.timeComplexity ?? undefined,
       space_complexity: item.spaceComplexity ?? undefined,
       warnings: Array.isArray(item.warnings) ? item.warnings : undefined,
+      functions: Array.isArray(item.functions) ? item.functions : undefined,
+      diagnostics: Array.isArray(item.diagnostics) ? item.diagnostics : undefined,
+      risk_breakdown: item.riskBreakdown ?? undefined,
       ai_review: item.aiReview ?? undefined,
     });
   };
@@ -388,6 +430,7 @@ export default function CodeBeaconDebugger() {
     try {
       await deleteSnippet(id);
       setHistory((prev) => prev.filter((item) => item.id !== id));
+      if (currentScanId === id) setCurrentScanId(null);
     } catch (err) {
       console.error('Failed to delete snippet:', err);
     }
@@ -434,6 +477,7 @@ export default function CodeBeaconDebugger() {
     
     setLoading(true);
     setError(null);
+    setRefactorSummary(null);
     setResult(null);
     setForensics(null);
 
@@ -462,10 +506,14 @@ export default function CodeBeaconDebugger() {
           timeComplexity: metrics.time_complexity,
           spaceComplexity: metrics.space_complexity,
           warnings: metrics.warnings,
+          functions: metrics.functions,
+          diagnostics: metrics.diagnostics,
+          riskBreakdown: metrics.risk_breakdown,
           aiReview: metrics.ai_review,
         });
 
         if (saved?.ok) {
+          if (saved.id) setCurrentScanId(saved.id);
           const updatedHistory = await getSnippetHistory();
           if (Array.isArray(updatedHistory)) setHistory(updatedHistory);
         }
@@ -875,19 +923,47 @@ export default function CodeBeaconDebugger() {
 
           {result !== null && (
             <div className="mt-8 w-full border border-gray-800/80 bg-[#0d0d0d]/90 rounded-2xl p-6 transition-all duration-500 backdrop-blur-md relative z-20 space-y-6">
-              <div className="flex items-center justify-between border-b border-gray-800/80 pb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800/80 pb-4">
                 <div>
                   <h2 className="text-sm font-bold uppercase tracking-wider text-gray-200">Forensics Report Card</h2>
                   <p className="text-xs text-gray-500 mt-0.5">{title || 'Untitled Snippet'} • {LANGUAGE_NAMES[language]}</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleExportReport}
-                  className="text-xs font-semibold text-blue-400 hover:text-blue-300 bg-blue-950/30 hover:bg-blue-950/50 border border-blue-800/50 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer"
-                >
-                  Export JSON Report
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRefactorCode}
+                    disabled={refactoring}
+                    className="text-xs font-semibold text-emerald-300 hover:text-white bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-700/50 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {refactoring ? 'Refactoring...' : '✨ Auto-Fix Hazards'}
+                  </button>
+
+                  {currentScanId && (
+                    <button
+                      type="button"
+                      onClick={handleCopyShareLink}
+                      className="text-xs font-semibold text-purple-300 hover:text-white bg-purple-950/40 hover:bg-purple-900/50 border border-purple-700/50 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                    >
+                      {copiedShareLink ? '✓ Link Copied!' : 'Share Report Link'}
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleExportReport}
+                    className="text-xs font-semibold text-blue-400 hover:text-blue-300 bg-blue-950/30 hover:bg-blue-950/50 border border-blue-800/50 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                  >
+                    Export JSON Report
+                  </button>
+                </div>
               </div>
+
+              {refactorSummary && (
+                <div className="bg-emerald-950/25 border border-emerald-800/50 text-emerald-300 text-xs px-4 py-3 rounded-xl flex items-center justify-between">
+                  <span><strong>Auto-Fix Applied:</strong> {refactorSummary}</span>
+                  <span className="text-[11px] text-gray-400">Click &ldquo;Run Diagnostics&rdquo; to re-score</span>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className={`p-5 rounded-xl border text-center ${result > 50 ? 'border-red-900/50 bg-red-900/10' : result > 20 ? 'border-yellow-900/50 bg-yellow-900/10' : 'border-green-900/50 bg-green-900/10'}`}>
