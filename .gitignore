@@ -5,3 +5,4 @@ venv/
 docker-volumes/
 *.csv
 *.joblib
+.env
