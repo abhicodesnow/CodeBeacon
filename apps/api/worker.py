@@ -21,7 +21,7 @@ MODEL_PATHS = [
 
 rf_model = None
 for path in MODEL_PATHS:
-    if path.exists():
+    if path.exists() and path.stat().st_size > 0:
         try:
             rf_model = joblib.load(path)
             print(f"[CodeBeacon Worker] Loaded RF model from {path}")
@@ -76,6 +76,54 @@ def estimate_complexity(code: str, max_loop_depth: int) -> tuple[str, str]:
     return time_comp, space_comp
 
 
+def synthesize_local_review(metrics: dict, language: str) -> str:
+    bullets = []
+    time_c = metrics.get("time_complexity", "O(N)")
+    space_c = metrics.get("space_complexity", "O(1)")
+    depth = metrics.get("max_nesting_depth", 1)
+    diags = metrics.get("diagnostics", [])
+    funcs = metrics.get("functions", [])
+
+    if "N^3" in time_c or "N^2" in time_c:
+        bullets.append(
+            f"• Algorithmic Bottleneck ({time_c} Time, {space_c} Space): Nested loop depth of {depth} "
+            f"will Time Limit Exceed (TLE) for N >= 10^4. Consider prefix sums, hashing, or two-pointer reductions."
+        )
+    elif "2^N" in time_c:
+        bullets.append(
+            f"• Exponential Recursion ({time_c}): Unmemoized recursive branching detected. Add DP memoization to cache overlapping states."
+        )
+    else:
+        bullets.append(
+            f"• Asymptotic Efficiency ({time_c} Time, {space_c} Space): Scaling is well-suited for standard competitive constraints (N <= 2*10^5)."
+        )
+
+    if funcs:
+        hottest = max(funcs, key=lambda f: f["cyclomatic_complexity"])
+        if hottest["cyclomatic_complexity"] > 8:
+            bullets.append(
+                f"• Control-Flow Hotspot: Function '{hottest['name']}' (L{hottest['start_line']}–L{hottest['end_line']}) "
+                f"has a Cyclomatic Complexity of {hottest['cyclomatic_complexity']} across {hottest['nloc']} NLOC."
+            )
+        else:
+            bullets.append(
+                f"• Modular Structure: {len(funcs)} function(s) analyzed (peak CCN {hottest['cyclomatic_complexity']} in '{hottest['name']}')."
+            )
+
+    if diags:
+        top_diag = diags[0]
+        bullets.append(
+            f"• Priority Remediation (Line {top_diag['line']}): {top_diag['message']} "
+            f"Use 'Auto-Fix Hazards' above to patch static hazards automatically."
+        )
+    else:
+        bullets.append(
+            f"• Static Safety Verification: No unsafe buffer calls, 32-bit overflow constants, or unguarded divisions detected in this {language.upper()} snippet."
+        )
+
+    return "\n".join(bullets)
+
+
 def extract_code_forensics(code: str, language: str) -> dict:
     virtual_filename = LIZARD_EXT_MAP.get(language, "snippet.cpp")
     lizard_info = lizard.analyze_file.analyze_source_code(virtual_filename, code)
@@ -122,7 +170,7 @@ def extract_code_forensics(code: str, language: str) -> dict:
                     is_loop = isinstance(child, (ast.For, ast.While))
                     walk_ast(child, depth + (1 if is_branch else 0), loop_depth + (1 if is_loop else 0))
             walk_ast(tree)
-        except SyntaxError as e:
+        except SyntaxError:
             max_depth = max((len(line) - len(line.lstrip())) // 4 for line in non_empty_lines) if non_empty_lines else 0
             max_loop_depth = min(max_depth, len(re.findall(r'\b(for|while)\b', code)))
     else:
@@ -136,7 +184,6 @@ def extract_code_forensics(code: str, language: str) -> dict:
         loop_count = len(re.findall(r'\b(for|while)\s*\(', code))
         max_loop_depth = min(max_depth, loop_count)
 
-    # Line-aware Static & Security Diagnostics
     diagnostics = []
     warnings = []
 
@@ -166,7 +213,9 @@ def extract_code_forensics(code: str, language: str) -> dict:
                 add_diag(idx, "error", "Potential 32-bit signed integer overflow near 64-bit constant (use 'long long').")
             if re.search(r'\bcin\s*>>', line) and not has_fast_io:
                 add_diag(idx, "info", "Unbuffered 'cin' without 'ios::sync_with_stdio(false)' may cause TLE on large inputs.")
-                has_fast_io = True  # Report once per snippet
+                has_fast_io = True
+            if re.search(r'\bendl\b', line):
+                add_diag(idx, "info", "Using 'endl' forces buffer flush on every line; use '\\n' for faster I/O.")
         elif language == "py":
             if re.search(r'\b(eval|exec)\s*\(', line):
                 add_diag(idx, "error", "Unsafe dynamic execution ('eval'/'exec') detected.")
@@ -185,12 +234,10 @@ def extract_code_forensics(code: str, language: str) -> dict:
     if max_depth > 4:
         add_diag(1, "warning", f"Deep control-flow nesting (depth {max_depth}) increases cognitive load.")
 
-    # Maintainability Index (0-100)
     volume_approx = max(1.0, max(token_count, len(code)) * math.log2(max(2, len(set(code.split())))))
     raw_mi = 171 - 5.2 * math.log(volume_approx) - 0.23 * cyclomatic_complexity - 16.2 * math.log(max(1, loc))
     maintainability_index = round(max(0.0, min(100.0, (raw_mi * 100.0) / 171.0)), 1)
 
-    # Random Forest Inference
     bug_prob = None
     if rf_model is not None:
         try:
@@ -212,7 +259,6 @@ def extract_code_forensics(code: str, language: str) -> dict:
         score = (cyclomatic_complexity * 2.8) + (max_depth * 6.5) + (len(diagnostics) * 14.0) + (loc * 0.15)
         bug_prob = round(min(98.0, max(2.0, score)), 1)
 
-    # Explainable ML Risk Attribution Breakdown (sums to 100%)
     ccn_weight = max(1.0, cyclomatic_complexity * 2.8)
     depth_weight = max(1.0, max_depth * 6.5)
     hazard_weight = len(diagnostics) * 14.0
@@ -247,40 +293,38 @@ def extract_code_forensics(code: str, language: str) -> dict:
     }
 
 
-async def fetch_llm_review(code: str, language: str) -> Optional[str]:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None
-
+async def fetch_llm_review(code: str, language: str, metrics: Optional[dict] = None) -> str:
+    groq_key = os.getenv("GROQ_API_KEY")
     prompt = (
         f"You are a senior competitive programming and systems engineer. "
-        f"Review this {language} snippet in 2 concise bullet points focusing on "
-        f"edge cases, memory safety, or time-complexity bottlenecks:\n\n{code[:3000]}"
+        f"Review this {language} snippet in 3 concise bullet points focusing on "
+        f"edge cases, memory safety, time-complexity bottlenecks, and how to fix them:\n\n{code[:3000]}"
     )
-    try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 180,
-                },
-            )
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"[CodeBeacon Worker] Groq LLM skipped: {e}")
-    return None
+
+    if groq_key:
+        try:
+            async with httpx.AsyncClient(timeout=7.0) as client:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.2,
+                        "max_tokens": 220,
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"[CodeBeacon Worker] Groq LLM error: {e}")
+
+    return synthesize_local_review(metrics or extract_code_forensics(code, language), language)
 
 
 async def run_forensics_job(ctx, code: str, language: str) -> dict:
     metrics = extract_code_forensics(code, language)
-    ai_review = await fetch_llm_review(code, language)
-    if ai_review:
-        metrics["ai_review"] = ai_review
+    metrics["ai_review"] = await fetch_llm_review(code, language, metrics)
     return metrics
 
 

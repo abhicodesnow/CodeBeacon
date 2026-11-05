@@ -62,6 +62,12 @@ class RefactorRequest(BaseModel):
     warnings: Optional[List[str]] = None
 
 
+class GenerateRequest(BaseModel):
+    prompt: str
+    language: str = "cpp"
+    current_code: str = ""
+
+
 def limit_sandbox_resources():
     try:
         resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
@@ -72,7 +78,6 @@ def limit_sandbox_resources():
 
 
 def deterministic_local_refactor(code: str, language: str) -> tuple[str, str]:
-    """Deterministic static-hazard fixer when GROQ_API_KEY is not configured."""
     fixed = code
     notes = []
 
@@ -84,7 +89,11 @@ def deterministic_local_refactor(code: str, language: str) -> tuple[str, str]:
                 fixed,
                 count=1,
             )
-            notes.append("Injected fast I/O synchronization ('ios::sync_with_stdio(false); cin.tie(nullptr);').")
+            notes.append("Injected fast I/O ('ios::sync_with_stdio(false); cin.tie(nullptr);').")
+
+        if re.search(r'<<\s*(?:std::)?endl\b', fixed):
+            fixed = re.sub(r'<<\s*(?:std::)?endl\b', r"<< '\\n'", fixed)
+            notes.append("Replaced buffer-flushing 'endl' with '\\n'.")
 
         if re.search(r'\bstrcpy\s*\(\s*([a-zA-Z_]\w*)\s*,', fixed):
             fixed = re.sub(
@@ -112,9 +121,14 @@ def deterministic_local_refactor(code: str, language: str) -> tuple[str, str]:
             notes.append("Aliased 'input()' to 'sys.stdin.readline' for fast competitive I/O.")
 
     if not notes:
-        notes.append("Verified formatting and safety guards (set GROQ_API_KEY in .env for deep LLM refactoring).")
+        notes.append("Verified static safety guards (set GROQ_API_KEY in .env for full LLM code rewriting).")
 
     return fixed, " • ".join(notes)
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "codebeacon-api"}
 
 
 @app.post("/analyze")
@@ -122,7 +136,7 @@ async def analyze_code(payload: AnalyzeRequest):
     if not payload.code.strip():
         raise HTTPException(status_code=400, detail="Code snippet cannot be empty.")
 
-    cache_key = f"codebeacon:analyze:v3:{payload.language}:{hashlib.sha256(payload.code.encode()).hexdigest()}"
+    cache_key = f"codebeacon:analyze:v4:{payload.language}:{hashlib.sha256(payload.code.encode()).hexdigest()}"
     if redis_client:
         try:
             cached = redis_client.get(cache_key)
@@ -132,9 +146,7 @@ async def analyze_code(payload: AnalyzeRequest):
             pass
 
     metrics = extract_code_forensics(payload.code, payload.language)
-    ai_review = await fetch_llm_review(payload.code, payload.language)
-    if ai_review:
-        metrics["ai_review"] = ai_review
+    metrics["ai_review"] = await fetch_llm_review(payload.code, payload.language, metrics)
 
     if redis_client:
         try:
@@ -179,7 +191,7 @@ async def refactor_code(payload: RefactorRequest):
                             "status": "success",
                             "engine": "llama-3.3-70b",
                             "refactored_code": parsed["refactored_code"],
-                            "summary": parsed.get("summary", "Refactored with Llama 3.3."),
+                            "summary": parsed.get("summary", "Refactored with Groq Llama 3.3."),
                         }
         except Exception as e:
             print(f"[CodeBeacon API] Groq refactor fallback: {e}")
@@ -191,6 +203,65 @@ async def refactor_code(payload: RefactorRequest):
         "refactored_code": fixed_code,
         "summary": summary,
     }
+
+
+@app.post("/generate")
+async def generate_with_groq(payload: GenerateRequest):
+    if not payload.prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="GROQ_API_KEY is missing in your root .env file.",
+        )
+
+    lang_map = {"cpp": "C++", "py": "Python", "java": "Java", "js": "JavaScript", "rs": "Rust"}
+    target_lang = lang_map.get(payload.language, payload.language)
+
+    context_block = (
+        f"\n\nCurrent editor code (modify or reference if relevant):\n{payload.current_code[:3000]}"
+        if payload.current_code.strip()
+        else ""
+    )
+
+    system_prompt = (
+        f"You are an expert competitive programmer and systems engineer. "
+        f"Generate clean, optimal, bug-free {target_lang} code for the user's request. "
+        f"Return ONLY valid JSON with two keys: "
+        f"\"code\" (the raw {target_lang} source code with no markdown fences) and "
+        f"\"explanation\" (a concise 1-2 sentence explanation of the approach and complexity)."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Task: {payload.prompt}{context_block}"},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.2,
+                },
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+            parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
+            return {
+                "status": "success",
+                "code": parsed.get("code", ""),
+                "explanation": parsed.get("explanation", "Generated with Groq Llama 3.3 70B."),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Groq generation failed: {e}")
 
 
 @app.post("/analyze/async")
